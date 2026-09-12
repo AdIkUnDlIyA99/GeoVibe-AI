@@ -7,7 +7,6 @@ import os
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.request import urlretrieve
 
 import numpy as np
 import requests
@@ -42,7 +41,42 @@ def ensure_spei():
         return
     SPEI_FILE.parent.mkdir(parents=True, exist_ok=True)
     print(f"Downloading official SPEIbase v2.11 SPEI-03 to {SPEI_FILE} ...")
-    urlretrieve(SPEI_URL, SPEI_FILE)
+    headers = {"User-Agent": "GeoVibe-AI/1.0 academic-drought-research"}
+    expected_size = None
+    error = None
+    for attempt in range(20):
+        downloaded = SPEI_FILE.stat().st_size if SPEI_FILE.exists() else 0
+        request_headers = dict(headers)
+        if downloaded:
+            request_headers["Range"] = f"bytes={downloaded}-"
+        try:
+            with requests.get(SPEI_URL, headers=request_headers, stream=True, timeout=(30, 120)) as response:
+                if response.status_code not in (200, 206):
+                    raise RuntimeError(f"SPEI server returned HTTP {response.status_code}")
+                if response.status_code == 200 and downloaded:
+                    downloaded = 0
+                content_range = response.headers.get("Content-Range", "")
+                if "/" in content_range:
+                    expected_size = int(content_range.rsplit("/", 1)[1])
+                elif response.headers.get("Content-Length"):
+                    expected_size = downloaded + int(response.headers["Content-Length"])
+                mode = "ab" if response.status_code == 206 and downloaded else "wb"
+                with SPEI_FILE.open(mode) as target:
+                    for chunk in response.iter_content(chunk_size=4 * 1024 * 1024):
+                        if chunk:
+                            target.write(chunk)
+                current_size = SPEI_FILE.stat().st_size
+                print(f"SPEI download: {current_size / 1_000_000:.1f} MB" + (f" / {expected_size / 1_000_000:.1f} MB" if expected_size else ""))
+                if expected_size is None or current_size >= expected_size:
+                    break
+        except (OSError, requests.RequestException, RuntimeError, ValueError) as exc:
+            error = exc
+            print(f"Download interrupted; resuming in {min(30, 2 ** attempt)} seconds ({exc})")
+            time.sleep(min(30, 2 ** attempt))
+    else:
+        raise RuntimeError(f"SPEI download did not complete after 20 resumable attempts: {error}")
+    if SPEI_FILE.stat().st_size < 300_000_000:
+        raise RuntimeError(f"Downloaded SPEI file is incomplete ({SPEI_FILE.stat().st_size} bytes)")
 
 
 def split_for(region):
