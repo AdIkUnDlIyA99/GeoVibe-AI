@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GeoVibe AI | Satellite Environmental Monitoring</title>
+  <meta name="description" content="Global satellite environmental monitoring using NDVI, NDWI and AI-assisted risk analysis.">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="boot-sequence" aria-hidden="true">
+    <div class="boot-globe"><i></i><span></span></div>
+    <p>GEOVIBE AI / ORBITAL INTELLIGENCE</p>
+    <h1>READ THE PLANET<br><b>FROM ORBIT</b></h1>
+    <div class="boot-progress"><span></span></div>
+    <small>GLOBAL ENVIRONMENTAL INTELLIGENCE</small>
+  </div>
+  <div class="grain"></div>
+  <div class="cosmic-field" aria-hidden="true">
+    <i class="orbit orbit-one"></i><i class="orbit orbit-two"></i><i class="orbit orbit-three"></i>
+    <i class="signal-beam beam-one"></i><i class="signal-beam beam-two"></i>
+  </div>
+  <div class="app-shell">
+    <div class="ambient-engine" aria-hidden="true">
+      <i class="aurora aurora-lime"></i>
+      <i class="aurora aurora-cyan"></i>
+      <i class="aurora aurora-solar"></i>
+      <span class="telemetry-arc arc-one"></span>
+      <span class="telemetry-arc arc-two"></span>
+    </div>
+    <header>
+      <a class="brand" href="#geoPicker" aria-label="GeoVibe AI dashboard">
+        <span class="brand-mark" role="img" aria-label="Earth">🌍</span>
+        <span>GeoVibe <b>AI</b><small>Environmental intelligence</small></span>
+      </a>
+      <div class="mission-context">
+        <span>MONITOR</span>
+        <strong>VEGETATION + SURFACE WATER</strong>
+        <small>Compare satellite captures. Detect change. Explore trajectories.</small>
+      </div>
+      <div class="system-status"><span class="pulse"></span><span>Sentinel-2 live</span><b>GLOBAL</b></div>
+    </header>
+
+    <main class="dashboard-grid">
+      <aside class="left-rail" id="geoPicker">
+        <section class="panel control-panel">
+          <div class="panel-heading"><p>Analysis controls</p><span>GLOBAL</span></div>
+          <div class="aoi-control">
+            <label class="aoi-field" for="location">
+              <span>Area of interest</span>
+              <input id="location" value="New Delhi, India" placeholder="Search any place or coordinates" autocomplete="off" aria-autocomplete="list" aria-controls="searchResults">
+              <small class="field-hint" id="coverageHint">Search worldwide or move the map pin</small>
+            </label>
+            <div class="search-results" id="searchResults" role="listbox" aria-label="Location suggestions" hidden></div>
+          </div>
+          <div class="mini-map-toolbar"><span>Target map</span><b id="coordinates">28.6139&deg; N / 77.2090&deg; E</b></div>
+          <div class="geo-stage">
+            <div id="worldMap" aria-label="Interactive world map"></div>
+            <div class="map-help"><i></i> Click or drag pin</div>
+          </div>
+          <div class="date-grid">
+            <label><span>Baseline date</span><input id="beforeDate" type="date" value="2024-03-15"></label>
+            <label><span>Comparison date</span><input id="afterDate" type="date" value="2026-03-15"></label>
+          </div>
+          <button class="primary" id="analyzeBtn"><span>Run analysis</span><b>&rarr;</b></button>
+        </section>
+
+        <section class="panel indices">
+          <div class="panel-heading"><p>Spectral indices</p><span>LIVE</span></div>
+          <div class="index-row ndvi-index"><span><i></i>NDVI <small id="ndviGap">Vegetation health</small></span><b id="ndvi">--</b></div>
+          <div class="index-row ndwi-index"><span><i></i>NDWI <small id="ndwiGap">Surface water</small></span><b id="ndwi">--</b></div>
+        </section>
+
+        <section class="panel recommendations-card analysis-guide">
+          <div class="panel-heading"><p>How to analyze</p><span>QUICK GUIDE</span></div>
+          <div class="analysis-guide-list">
+            <div class="guide-step"><b>01</b><span><strong>Choose a focused date range</strong><small>Use 3-36 months. Sentinel-2 begins in 2015; comparison dates cannot be in the future.</small></span></div>
+            <div class="guide-step"><b>02</b><span><strong>Allow for capture matching</strong><small>Clear imagery must exist within ±40 days. If unavailable, shift the selected date by 1-2 months.</small></span></div>
+            <div class="guide-step"><b>03</b><span><strong>Position, run, then interpret</strong><small>Solid lines are observations, fine dots are spatial controls, and dashes project six months.</small></span></div>
+          </div>
+        </section>
+
+      </aside>
+
+      <section class="center-stage">
+        <article class="panel map-card" id="changeLab">
+          <div class="card-head">
+            <div><p class="section-kicker">CHANGE DETECTION</p><h2>Satellite comparison</h2></div>
+            <div class="legend"><span><i class="forest"></i>Vegetation</span><span><i class="water"></i>Water</span></div>
+          </div>
+          <div class="maps">
+            <figure><canvas id="beforeMap" width="720" height="480"></canvas><figcaption><b>Baseline</b><span id="beforeCaption">15 Mar 2024</span></figcaption></figure>
+            <figure><canvas id="afterMap" width="720" height="480"></canvas><figcaption><b>Comparison</b><span id="afterCaption">15 Mar 2026</span></figcaption></figure>
+          </div>
+          <div class="upload-row"><span id="satelliteSource">Loading Copernicus Sentinel-2 observations...</span></div>
+        </article>
+
+        <article class="panel chart-card" id="forecast">
+          <div class="card-head trajectory-head">
+            <div class="trajectory-title">
+              <label for="trajectoryMetric">TRAJECTORY SIGNAL</label>
+              <select id="trajectoryMetric">
+                <option value="all">All indices</option>
+                <option value="ndvi">NDVI / Vegetation</option>
+                <option value="ndwi">NDWI / Water</option>
+              </select>
+              <h2 id="trajectoryTitle">Environmental index trajectory</h2>
+            </div>
+            <div class="trajectory-meta">
+              <div class="trajectory-tools">
+                <span class="pan-hint" id="trajectoryPanHint">Drag to pan</span>
+                <div class="chart-zoom" aria-label="Trajectory graph zoom controls">
+                  <button id="trajectoryZoomOut" type="button" aria-label="Zoom out trajectory graph" title="Zoom out">&minus;</button>
+                  <button id="trajectoryZoomIn" type="button" aria-label="Zoom in trajectory graph" title="Zoom in">+</button>
+                </div>
+              </div>
+              <div class="chart-legend" id="chartLegend"></div>
+            </div>
+          </div>
+          <svg id="trend" viewBox="0 0 900 300" role="img" aria-labelledby="trajectoryTitle"></svg>
+        </article>
+      </section>
+
+      <aside class="right-rail">
+        <section class="panel alerts-card evidence-card">
+          <div class="panel-heading"><p>Change passport</p><span class="passport-state" id="passportState">WAITING</span></div>
+          <div class="evidence-verdict" id="passportVerdict">
+            <span>EVIDENCE DECISION</span><h2>Awaiting analysis</h2><p>Select a place and dates to generate an auditable result.</p>
+          </div>
+          <div class="passport-body">
+            <div class="cnn-block"><div><span>FLOOD-WATER CNN</span><b id="waterChange">--</b></div><div class="cnn-grid" id="cnnGrid" aria-label="Flood-water probability grid"></div></div>
+            <div class="passport-signal"><span>DROUGHT INDEX SIGNAL</span><b id="droughtSignal">--</b><small>NDVI/NDWI trend, not an event probability</small></div>
+            <div class="capture-ledger" id="captureLedger"></div>
+            <button class="passport-download" id="downloadPassport" type="button" disabled>Download evidence JSON</button>
+          </div>
+        </section>
+
+        <section class="panel validation-card">
+          <div class="validation-head"><span>REAL MODEL VALIDATION</span><strong id="validationAccuracy">--</strong></div>
+          <div class="validation-metrics"><span>BAL ACC <b id="validationBalanced">--</b></span><span>F1 <b id="validationF1">--</b></span><span>IoU <b id="validationIou">--</b></span><span>BRIER <b id="validationBrier">--</b></span></div>
+          <small id="validationSource">Held-out geographic test set</small>
+        </section>
+
+      </aside>
+    </main>
+
+    <footer class="quote-ticker" aria-label="Earth observation perspectives">
+      <div class="ticker-track">
+        <div class="ticker-group">
+          <span>PROVE RECOVERY BEFORE THE NEXT FUNDING RELEASE.</span><i></i>
+          <span>TURN SATELLITE SIGNALS INTO FIELD PRIORITIES.</span><i></i>
+          <span>SEPARATE LOCAL IMPACT FROM REGIONAL WEATHER.</span><i></i>
+          <span>MEASURE WHAT CHANGED. CHALLENGE WHY IT CHANGED.</span><i></i>
+          <span>FROM INTERVENTION SITE TO AUDITABLE EVIDENCE.</span><i></i>
+        </div>
+        <div class="ticker-group" aria-hidden="true">
+          <span>PROVE RECOVERY BEFORE THE NEXT FUNDING RELEASE.</span><i></i>
+          <span>TURN SATELLITE SIGNALS INTO FIELD PRIORITIES.</span><i></i>
+          <span>SEPARATE LOCAL IMPACT FROM REGIONAL WEATHER.</span><i></i>
+          <span>MEASURE WHAT CHANGED. CHALLENGE WHY IT CHANGED.</span><i></i>
+          <span>FROM INTERVENTION SITE TO AUDITABLE EVIDENCE.</span><i></i>
+        </div>
+      </div>
+    </footer>
+  </div>
+  <div class="toast" id="toast"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="/app.js"></script>
+</body>
+</html>
