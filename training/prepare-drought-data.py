@@ -12,7 +12,10 @@ import numpy as np
 import requests
 import xarray as xr
 
-SPEI_URL = "https://spei.csic.es/spei_database_2_11/nc/spei03.nc"
+SPEI_SOURCES = [
+    ("CSIC SPEIbase v2.11", "https://spei.csic.es/spei_database_2_11/nc/spei03.nc"),
+    ("Digital.CSIC SPEIbase v2.10", "https://digital.csic.es/bitstream/10261/364137/3/spei03.nc"),
+]
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 POINT_URL = "https://planetarycomputer.microsoft.com/api/data/v1/item/point/{lon},{lat}"
 TARGET = int(os.environ.get("DROUGHT_SEQUENCES", "600"))
@@ -37,11 +40,31 @@ def request_json(method, url, **kwargs):
 
 
 def ensure_spei():
-    if SPEI_FILE.exists() and SPEI_FILE.stat().st_size > 300_000_000:
-        return
     SPEI_FILE.parent.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading official SPEIbase v2.11 SPEI-03 to {SPEI_FILE} ...")
+    source_marker = SPEI_FILE.with_suffix(SPEI_FILE.suffix + ".source")
     headers = {"User-Agent": "GeoVibe-AI/1.0 academic-drought-research"}
+    selected = None
+    for name, url in SPEI_SOURCES:
+        try:
+            probe = requests.get(url, headers={**headers, "Range": "bytes=0-0"}, timeout=(15, 20))
+            if probe.status_code == 206 and "/" in probe.headers.get("Content-Range", ""):
+                selected = (name, url, int(probe.headers["Content-Range"].rsplit("/", 1)[1]))
+                break
+            print(f"Skipping {name}: range probe returned HTTP {probe.status_code}")
+        except requests.RequestException as exc:
+            print(f"Skipping {name}: server unavailable from this runtime ({exc})")
+    if selected is None:
+        raise RuntimeError("Neither official SPEIbase host is reachable from this runtime")
+    source_name, source_url, total_size = selected
+    recorded_source = source_marker.read_text(encoding="utf-8").strip() if source_marker.exists() else None
+    if SPEI_FILE.exists() and recorded_source != source_url:
+        print("Discarding an unverified or differently sourced partial SPEI file")
+        SPEI_FILE.unlink(missing_ok=True)
+    source_marker.write_text(source_url, encoding="utf-8")
+    if SPEI_FILE.exists() and SPEI_FILE.stat().st_size >= total_size:
+        print(f"Using complete {source_name} file at {SPEI_FILE}")
+        return source_name
+    print(f"Downloading {source_name} SPEI-03 to {SPEI_FILE} ...")
     expected_size = None
     error = None
     for attempt in range(20):
@@ -50,7 +73,7 @@ def ensure_spei():
         if downloaded:
             request_headers["Range"] = f"bytes={downloaded}-"
         try:
-            with requests.get(SPEI_URL, headers=request_headers, stream=True, timeout=(30, 120)) as response:
+            with requests.get(source_url, headers=request_headers, stream=True, timeout=(30, 120)) as response:
                 if response.status_code not in (200, 206):
                     raise RuntimeError(f"SPEI server returned HTTP {response.status_code}")
                 if response.status_code == 200 and downloaded:
@@ -77,6 +100,7 @@ def ensure_spei():
         raise RuntimeError(f"SPEI download did not complete after 20 resumable attempts: {error}")
     if SPEI_FILE.stat().st_size < 300_000_000:
         raise RuntimeError(f"Downloaded SPEI file is incomplete ({SPEI_FILE.stat().st_size} bytes)")
+    return source_name
 
 
 def split_for(region):
@@ -162,7 +186,7 @@ def candidate_rows(dataset):
 
 
 def main():
-    ensure_spei()
+    spei_source = ensure_spei()
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     completed = set()
     if OUTPUT.exists():
@@ -181,7 +205,7 @@ def main():
             endpoint = datetime.fromisoformat(candidate["date"]).replace(tzinfo=timezone.utc)
             sequence = sentinel_sequence(candidate["lat"], candidate["lon"], endpoint)
             if sequence:
-                record = {"region": candidate["region"], "split": candidate["split"], "endpoint": candidate["date"], "latitude": candidate["lat"], "longitude": candidate["lon"], "spei": candidate["spei"], "sequence": sequence, "sources": ["CSIC SPEIbase v2.11", "Copernicus Sentinel-2 L2A via Microsoft Planetary Computer"]}
+                record = {"region": candidate["region"], "split": candidate["split"], "endpoint": candidate["date"], "latitude": candidate["lat"], "longitude": candidate["lon"], "spei": candidate["spei"], "sequence": sequence, "sources": [spei_source, "Copernicus Sentinel-2 L2A via Microsoft Planetary Computer"]}
                 target.write(json.dumps(record, separators=(",", ":")) + "\n")
                 target.flush()
             print(f"[{index}/{len(candidates)}] {candidate['region']} {'saved' if sequence else 'skipped: insufficient clear observations'}")
