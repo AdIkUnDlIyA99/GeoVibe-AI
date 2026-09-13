@@ -1,0 +1,21 @@
+{
+  "name": "geovibe-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Single-date global Sentinel-2 monitoring with six-month NDVI, NDWI, flood and drought outlooks.",
+  "scripts": {
+    "start": "node server.js",
+    "train": "node training/train-sen1floods11.js",
+    "train:inventory": "set INVENTORY_ONLY=1&& node training/train-sen1floods11.js",
+    "prepare:forecast": "python training/prepare-forecast-data.py",
+    "train:forecast": "node training/train-forecast.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "geotiff": "^2.1.3",
+    "leaflet": "^1.9.4"
+  }
+}

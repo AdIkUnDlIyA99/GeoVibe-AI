@@ -3,4 +3,6 @@ node_modules/
 logs/
 training/.cache/
 training/checkpoints/
+training/data/
+models/*.candidate.json
 *.log
