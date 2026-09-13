@@ -43,6 +43,23 @@ def ensure_spei():
     SPEI_FILE.parent.mkdir(parents=True, exist_ok=True)
     source_marker = SPEI_FILE.with_suffix(SPEI_FILE.suffix + ".source")
     headers = {"User-Agent": "GeoVibe-AI/1.0 academic-drought-research"}
+
+    # A user-supplied Drive copy must work even when Colab cannot reach CSIC.
+    if SPEI_FILE.exists() and SPEI_FILE.stat().st_size >= 300_000_000:
+        try:
+            with xr.open_dataset(SPEI_FILE) as dataset:
+                has_spei = any("spei" in name.lower() for name in dataset.data_vars)
+                coordinate_names = {name.lower() for name in dataset.coords}
+                has_latitude = bool(coordinate_names.intersection({"lat", "latitude"}))
+                has_longitude = bool(coordinate_names.intersection({"lon", "longitude"}))
+                if not (has_spei and has_latitude and has_longitude and "time" in coordinate_names):
+                    raise ValueError("required SPEI variable or coordinates are missing")
+                description = str(dataset.attrs.get("title") or dataset.attrs.get("version") or "version supplied by user")
+            print(f"Using validated local SPEI NetCDF at {SPEI_FILE} ({SPEI_FILE.stat().st_size / 1_000_000:.1f} MB)")
+            return f"Local SPEIbase NetCDF: {description}"
+        except (OSError, ValueError, KeyError) as exc:
+            raise RuntimeError(f"The local SPEI file exists but is not a valid SPEI NetCDF: {exc}") from exc
+
     selected = None
     for name, url in SPEI_SOURCES:
         try:
