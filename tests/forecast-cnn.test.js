@@ -4,7 +4,7 @@ const { createForecastCnn, predictForecast, trainForecastCnn } = require("../src
 const { acceptance, verifySplits } = require("../training/train-forecast");
 
 function row(direction, split = "train", region = "region-a", originDate = "2021-01-01") {
-  const input = Array.from({ length: 12 }, (_, month) => ({ ndvi: 0.2 + direction * month * 0.02, ndwi: -0.1 + direction * month * 0.015, valid: true }));
+  const input = Array.from({ length: 12 }, (_, month) => ({ ndvi: 0.2 + direction * month * 0.02, ndwi: -0.1 + direction * month * 0.015, spei: direction * (0.2 + month * 0.08), valid: true }));
   return {
     region, split, originDate, input,
     targets: {
@@ -40,4 +40,19 @@ test("split audit rejects geographic and temporal leakage", () => {
 test("acceptance gate rejects under-sized or unskilled candidates", () => {
   const weak = { index: { ndvi: [{ rmse: 1, persistenceRmse: 0.5 }], ndwi: [{ rmse: 1, persistenceRmse: 0.5 }] }, drought: [{ balancedAccuracy: 0.5, f1: 0.4 }] };
   assert.equal(acceptance(weak, { train: 10, calibration: 2, test: 2 }).passed, false);
+});
+
+test("acceptance gate deploys passing horizons and abstains on a failed middle horizon", () => {
+  const skilled = {
+    index: { ndvi: [{ rmse: 0.1, persistenceRmse: 0.2 }], ndwi: [{ rmse: 0.1, persistenceRmse: 0.2 }] },
+    drought: [
+      { balancedAccuracy: 0.7, f1: 0.6 },
+      { balancedAccuracy: 0.63, f1: 0.48 },
+      { balancedAccuracy: 0.65, f1: 0.64 }
+    ]
+  };
+  const gate = acceptance(skilled, { train: 1598, calibration: 615, test: 654 });
+  assert.equal(gate.passed, true);
+  assert.equal(gate.fullPass, false);
+  assert.deepEqual(gate.acceptedDroughtHorizons, [1, 6]);
 });
