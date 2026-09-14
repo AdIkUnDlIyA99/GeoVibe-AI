@@ -19,6 +19,11 @@ TARGET = int(os.environ.get("FORECAST_SEQUENCES", "5000"))
 START_INDEX = max(1, int(os.environ.get("FORECAST_START_INDEX", "1")))
 WORKERS = max(1, min(8, int(os.environ.get("FORECAST_WORKERS", "4"))))
 ATTEMPTS = Path(os.environ.get("FORECAST_ATTEMPTS", str(OUTPUT.with_suffix(".attempts.jsonl"))))
+SPLITS = {
+    value.strip()
+    for value in os.environ.get("FORECAST_SPLITS", "train,calibration,test").split(",")
+    if value.strip()
+}
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 POINT_URL = "https://planetarycomputer.microsoft.com/api/data/v1/item/point/{lon},{lat}"
 
@@ -153,6 +158,10 @@ def main():
                 attempted.add(json.loads(line)["key"])
     with xr.open_dataset(SPEI_FILE) as dataset:
         selected = candidates(dataset)
+    unknown_splits = SPLITS - {"train", "calibration", "test"}
+    if unknown_splits:
+        raise RuntimeError(f"Unknown FORECAST_SPLITS values: {sorted(unknown_splits)}")
+    selected = [candidate for candidate in selected if candidate["split"] in SPLITS]
     pending = []
     for index, candidate in enumerate(selected, 1):
         if index < START_INDEX:
@@ -163,7 +172,7 @@ def main():
     print(
         f"Selected {len(selected)} candidates; {len(completed)} saved, "
         f"{len(attempted)} previously attempted, {len(pending)} pending; "
-        f"starting at {START_INDEX} with {WORKERS} workers",
+        f"splits={','.join(sorted(SPLITS))}; starting at {START_INDEX} with {WORKERS} workers",
         flush=True,
     )
 
