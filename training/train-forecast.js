@@ -80,7 +80,7 @@ function main() {
   const metrics = evaluate(model, test);
   const counts = { train: train.length, calibration: calibration.length, test: test.length };
   const gate = acceptance(metrics, counts);
-  const metadata = { status: gate.passed ? "accepted" : "rejected", trainedAt: new Date().toISOString(), dataset: path.resolve(DATASET), split: "disjoint geographic regions with training strictly earlier than testing", counts, gate };
+  const metadata = { schemaVersion: model.schemaVersion, status: gate.passed ? "accepted" : "rejected", trainedAt: new Date().toISOString(), dataset: path.resolve(DATASET), split: "disjoint geographic regions with training strictly earlier than testing", counts, gate };
   const artifact = { ...model, metrics, metadata };
   fs.mkdirSync(path.join(ROOT, "reports"), { recursive: true });
   fs.writeFileSync(path.join(ROOT, "reports", "forecast-evaluation.json"), JSON.stringify({ metadata, metrics }, null, 2));
