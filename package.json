@@ -8,6 +8,7 @@
     "train": "node training/train-sen1floods11.js",
     "train:inventory": "set INVENTORY_ONLY=1&& node training/train-sen1floods11.js",
     "prepare:forecast": "python training/prepare-forecast-data.py",
+    "enrich:forecast": "python training/enrich-forecast-spei.py",
     "train:forecast": "node training/train-forecast.js",
     "test": "node --test"
   },
