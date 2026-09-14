@@ -32,7 +32,7 @@ function loadDroughtModel() { return JSON.parse(fs.readFileSync(DROUGHT_MODEL_PA
 function loadForecastModel() {
   if (!fs.existsSync(FORECAST_MODEL_PATH)) return null;
   const model = JSON.parse(fs.readFileSync(FORECAST_MODEL_PATH, "utf8"));
-  return model.metadata?.status === "accepted" ? model : null;
+  return model.metadata?.status?.startsWith("accepted") ? model : null;
 }
 function json(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" });
@@ -83,27 +83,45 @@ async function geocode(query) {
   const cached = geocodeCache.get(key);
   if (cached?.expires > Date.now()) return cached.results;
   if (cached) geocodeCache.delete(key);
-  const waitMs = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
-  if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
-  const endpoint = new URL("https://nominatim.openstreetmap.org/search");
-  endpoint.searchParams.set("q", query);
-  endpoint.searchParams.set("format", "jsonv2");
-  endpoint.searchParams.set("limit", "5");
-  endpoint.searchParams.set("addressdetails", "1");
-  lastGeocodeAt = Date.now();
-  const response = await fetchWithRetry(endpoint, {
-    headers: {
-      "Accept-Language": "en",
-      "User-Agent": "GeoVibe-AI/1.0 academic-environmental-monitoring-prototype"
-    }
-  });
-  if (!response.ok) throw new Error(`Location search unavailable (${response.status})`);
-  const results = (await response.json()).map((item) => ({
-    name: item.display_name,
-    lat: Number(item.lat),
-    lon: Number(item.lon),
-    boundingBox: item.boundingbox?.map(Number) || null
-  }));
+  const nominatim = async () => {
+    const waitMs = Math.max(0, 1100 - (Date.now() - lastGeocodeAt));
+    if (waitMs) await new Promise((resolve) => setTimeout(resolve, waitMs));
+    const endpoint = new URL("https://nominatim.openstreetmap.org/search");
+    endpoint.searchParams.set("q", query);
+    endpoint.searchParams.set("format", "jsonv2");
+    endpoint.searchParams.set("limit", "10");
+    endpoint.searchParams.set("dedupe", "0");
+    endpoint.searchParams.set("addressdetails", "1");
+    lastGeocodeAt = Date.now();
+    const response = await fetchWithRetry(endpoint, { headers: { "Accept-Language": "en", "User-Agent": "GeoVibe-AI/1.0 academic-environmental-monitoring-prototype" } });
+    if (!response.ok) throw new Error(`Nominatim returned ${response.status}`);
+    return (await response.json()).map((item) => ({ name: item.display_name, lat: Number(item.lat), lon: Number(item.lon), boundingBox: item.boundingbox?.map(Number) || null, provider: "Nominatim" }));
+  };
+  const photon = async () => {
+    const endpoint = new URL("https://photon.komoot.io/api/");
+    endpoint.searchParams.set("q", query);
+    endpoint.searchParams.set("limit", "10");
+    endpoint.searchParams.set("lang", "en");
+    const response = await fetchWithRetry(endpoint);
+    if (!response.ok) throw new Error(`Photon returned ${response.status}`);
+    return (await response.json()).features.map((feature) => {
+      const properties = feature.properties || {};
+      const parts = [properties.name, properties.street, properties.city || properties.locality, properties.county, properties.state, properties.country].filter(Boolean);
+      const extent = properties.extent;
+      return { name: [...new Set(parts)].join(", "), lat: Number(feature.geometry.coordinates[1]), lon: Number(feature.geometry.coordinates[0]), boundingBox: extent ? [extent[1], extent[3], extent[0], extent[2]] : null, provider: "Photon" };
+    });
+  };
+  const responses = await Promise.allSettled([photon(), nominatim()]);
+  const combined = responses.flatMap((response) => response.status === "fulfilled" ? response.value : []);
+  if (!combined.length) throw new Error("Location search providers are temporarily unavailable");
+  const seen = new Set();
+  const results = combined.filter((item) => {
+    if (!item.name || !Number.isFinite(item.lat) || !Number.isFinite(item.lon)) return false;
+    const identity = `${item.name.toLowerCase()}|${item.lat.toFixed(3)}|${item.lon.toFixed(3)}`;
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  }).slice(0, 12);
   cacheSet(geocodeCache, key, { expires: Date.now() + 24 * 60 * 60 * 1000, results });
   return results;
 }
@@ -138,7 +156,10 @@ function forecast(observations) {
     return {
       trajectories: { ndvi: makeSeries("ndvi", "NDVI", "Vegetation health"), ndwi: makeSeries("ndwi", "NDWI", "Surface water") },
       historyDates: dates.slice(-12), futureDates,
-      droughtForecast: { 1: prediction.drought[0], 3: prediction.drought[1], 6: prediction.drought[2] },
+      droughtForecast: Object.fromEntries([1, 3, 6].map((month, index) => {
+        const accepted = trainedModel.droughtDeployment?.find((item) => item.month === month)?.accepted === true;
+        return [month, accepted ? prediction.drought[index] : null];
+      })),
       modelStatus: "accepted-trained-cnn",
       uncertainty: "95% empirical error bands derived from geographically and temporally held-out RMSE"
     };
@@ -177,13 +198,14 @@ function modelLinkedHazards(observations, indexForecast, floodModel, droughtMode
       ndwi: clamp(cell.ndwi + ndwi - origin.indices.ndwi)
     }));
     const flood = inferGrid(floodModel, shiftedGrid);
+    const forecastDrought = indexForecast.droughtForecast?.[index + 1];
     return {
       month: index + 1,
       date,
       ndvi,
       ndwi,
       flood: flood ? +flood.temporaryWaterFraction.toFixed(4) : null,
-      drought: indexForecast.droughtForecast?.[index + 1] ?? (droughtModel.metadata?.status === "trained" ? +droughtProbability(droughtModel, projectedSequence.slice(-12)).toFixed(4) : null)
+      drought: forecastDrought !== undefined ? forecastDrought : (droughtModel.metadata?.status === "trained" ? +droughtProbability(droughtModel, projectedSequence.slice(-12)).toFixed(4) : null)
     };
   });
   const final = horizons.at(-1);
@@ -195,7 +217,7 @@ function modelLinkedHazards(observations, indexForecast, floodModel, droughtMode
       ndviDelta,
       ndwiDelta,
       floodExplanation: `Projected NDWI ${ndwiDelta >= 0 ? "rises" : "falls"} by ${Math.abs(ndwiDelta).toFixed(2)}; the flood-water CNN evaluates that projected spectral state.`,
-      droughtExplanation: `Projected NDVI ${ndviDelta >= 0 ? "rises" : "falls"} by ${Math.abs(ndviDelta).toFixed(2)} and NDWI ${ndwiDelta >= 0 ? "rises" : "falls"}; the temporal CNN evaluates the rolling 12-month sequence.`
+      droughtExplanation: final.drought === null ? "The drought model abstained because this horizon or its required climate input was not accepted." : `Projected NDVI ${ndviDelta >= 0 ? "rises" : "falls"} by ${Math.abs(ndviDelta).toFixed(2)} and NDWI ${ndwiDelta >= 0 ? "rises" : "falls"}; the temporal model evaluates the available history.`
     },
     validation: {
       flood: { ...floodModel.metrics, scope: "Current flood-water detection; future susceptibility is not separately validated." },
