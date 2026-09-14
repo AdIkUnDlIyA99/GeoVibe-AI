@@ -186,7 +186,10 @@ function fitForecastCalibration(model, rows, epochs = 250) {
       }
       const recall = tp / Math.max(1, tp + fn), specificity = tn / Math.max(1, tn + fp);
       const precision = tp / Math.max(1, tp + fp), f1 = 2 * precision * recall / Math.max(1e-9, precision + recall);
-      const score = (recall + specificity) / 2 + 0.15 * f1;
+      const balancedAccuracy = (recall + specificity) / 2;
+      // Select on calibration only, with margin above both deployment floors.
+      const clearsSafetyMargin = balancedAccuracy >= 0.62 && f1 >= 0.55;
+      const score = (clearsSafetyMargin ? 10 : 0) + f1 + 0.25 * balancedAccuracy;
       if (score > best.score) best = { threshold, score };
     }
     return best.threshold;
