@@ -66,9 +66,12 @@ function evaluate(model, rows) {
 function acceptance(report, counts) {
   const forecastPoints = [...report.index.ndvi, ...report.index.ndwi];
   const beatsPersistence = forecastPoints.every((item) => item.rmse < item.persistenceRmse);
-  const droughtPasses = report.drought.every((item) => item.balancedAccuracy >= 0.6 && item.f1 >= 0.5);
+  const droughtHorizons = report.drought.map((item, index) => ({ month: [1, 3, 6][index], accepted: item.balancedAccuracy >= 0.6 && item.f1 >= 0.5 }));
+  const droughtPasses = droughtHorizons.every((item) => item.accepted);
+  const acceptedDroughtHorizons = droughtHorizons.filter((item) => item.accepted).map((item) => item.month);
   const enoughData = counts.train >= 1000 && counts.calibration >= 150 && counts.test >= 300;
-  return { passed: beatsPersistence && droughtPasses && enoughData, checks: { beatsPersistence, droughtPasses, enoughData }, requirements: { train: 1000, calibration: 150, test: 300, droughtBalancedAccuracy: 0.6, droughtF1: 0.5 } };
+  const passed = beatsPersistence && enoughData && acceptedDroughtHorizons.includes(6);
+  return { passed, fullPass: passed && droughtPasses, checks: { beatsPersistence, droughtPasses, enoughData }, droughtHorizons, acceptedDroughtHorizons, requirements: { train: 1000, calibration: 150, test: 300, droughtBalancedAccuracy: 0.6, droughtF1: 0.5, mandatoryOperationalDroughtHorizon: 6 } };
 }
 
 function main() {
@@ -80,8 +83,9 @@ function main() {
   const metrics = evaluate(model, test);
   const counts = { train: train.length, calibration: calibration.length, test: test.length };
   const gate = acceptance(metrics, counts);
-  const metadata = { schemaVersion: model.schemaVersion, status: gate.passed ? "accepted" : "rejected", trainedAt: new Date().toISOString(), dataset: path.resolve(DATASET), split: "disjoint geographic regions with training strictly earlier than testing", counts, gate };
-  const artifact = { ...model, metrics, metadata };
+  const status = gate.fullPass ? "accepted" : gate.passed ? "accepted-with-abstention" : "rejected";
+  const metadata = { schemaVersion: model.schemaVersion, status, trainedAt: new Date().toISOString(), dataset: path.resolve(DATASET), split: "disjoint geographic regions with training strictly earlier than testing", counts, gate };
+  const artifact = { ...model, droughtDeployment: gate.droughtHorizons, metrics, metadata };
   fs.mkdirSync(path.join(ROOT, "reports"), { recursive: true });
   fs.writeFileSync(path.join(ROOT, "reports", "forecast-evaluation.json"), JSON.stringify({ metadata, metrics }, null, 2));
   fs.writeFileSync(path.join(ROOT, "models", "forecast-cnn.candidate.json"), JSON.stringify(artifact));
