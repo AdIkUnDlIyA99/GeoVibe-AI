@@ -111,6 +111,15 @@ def candidates(dataset):
     times = dataset[time_name].values
     time_lookup = {np.datetime_as_string(value, unit="M"): index for index, value in enumerate(times)}
     latitudes, longitudes = dataset[lat_name].values, dataset[lon_name].values
+    print("Loading SPEI values into memory for fast candidate generation...", flush=True)
+    spei_values = dataset[variable].transpose(time_name, lat_name, lon_name).values
+    years = []
+    if "train" in SPLITS:
+        years.extend(range(2018, 2022))
+    if "calibration" in SPLITS:
+        years.append(2022)
+    if "test" in SPLITS:
+        years.extend((2023, 2024))
     rows = []
     for lat_index in range(0, len(latitudes), max(1, len(latitudes) // LATITUDE_SAMPLES)):
         lat = float(latitudes[lat_index])
@@ -119,7 +128,7 @@ def candidates(dataset):
         for lon_index in range(0, len(longitudes), max(1, len(longitudes) // LONGITUDE_SAMPLES)):
             lon = float(longitudes[lon_index])
             region = f"spei-cell-{lat_index}-{lon_index}"
-            for year in range(2018, 2025):
+            for year in years:
                 split = split_for(region, year)
                 if not split:
                     continue
@@ -131,7 +140,7 @@ def candidates(dataset):
                         index = time_lookup.get(target.strftime("%Y-%m"))
                         if index is None:
                             break
-                        value = float(dataset[variable].isel({time_name: index, lat_name: lat_index, lon_name: lon_index}).values)
+                        value = float(spei_values[index, lat_index, lon_index])
                         indices.append(value)
                     if len(indices) == 3 and all(math.isfinite(value) and abs(value) < 20 for value in indices):
                         rows.append({"region": region, "split": split, "lat": lat, "lon": lon, "origin": origin, "spei": indices})
