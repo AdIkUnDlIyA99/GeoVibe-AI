@@ -142,8 +142,15 @@ def candidates(dataset):
                             break
                         value = float(spei_values[index, lat_index, lon_index])
                         indices.append(value)
-                    if len(indices) == 3 and all(math.isfinite(value) and abs(value) < 20 for value in indices):
-                        rows.append({"region": region, "split": split, "lat": lat, "lon": lon, "origin": origin, "spei": indices})
+                    history = []
+                    for target in month_targets(origin)[:12]:
+                        index = time_lookup.get(target.strftime("%Y-%m"))
+                        if index is None:
+                            break
+                        history.append(float(spei_values[index, lat_index, lon_index]))
+                    valid = lambda values: all(math.isfinite(value) and abs(value) < 20 for value in values)
+                    if len(indices) == 3 and len(history) == 12 and valid(indices) and valid(history):
+                        rows.append({"region": region, "split": split, "lat": lat, "lon": lon, "origin": origin, "spei": indices, "speiHistory": history})
     rows.sort(key=lambda row: hashlib.sha256(f'{row["region"]}:{row["origin"].isoformat()}'.encode()).hexdigest())
     per_split = {"train": int(TARGET * 0.72), "calibration": int(TARGET * 0.12), "test": TARGET - int(TARGET * 0.84)}
     selected = []
@@ -208,6 +215,8 @@ def main():
             index, candidate, key, sequence, error = future.result()
             origin_date = candidate["origin"].date().isoformat()
             if sequence:
+                for item, value in zip(sequence[:12], candidate["speiHistory"]):
+                    item["spei"] = round(value, 4)
                 record = {
                     "region": candidate["region"], "split": candidate["split"], "originDate": origin_date,
                     "latitude": candidate["lat"], "longitude": candidate["lon"], "input": sequence[:12],

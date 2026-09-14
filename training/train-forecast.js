@@ -11,6 +11,7 @@ function loadRows(file) {
     const row = JSON.parse(line);
     if (!row.region || !["train", "calibration", "test"].includes(row.split)) throw new Error(`Row ${index + 1} has an invalid geographic split`);
     if (!Array.isArray(row.input) || row.input.length !== 12) throw new Error(`Row ${index + 1} requires exactly 12 input months`);
+    if (!row.input.every((item) => Number.isFinite(Number(item.spei)))) throw new Error(`Row ${index + 1} requires twelve historical SPEI values; run enrich:forecast first`);
     if (!["ndvi", "ndwi"].every((key) => Array.isArray(row.targets?.[key]) && row.targets[key].length === 6)) throw new Error(`Row ${index + 1} requires six future NDVI/NDWI targets`);
     if (!Array.isArray(row.targets.drought) || row.targets.drought.length !== 3) throw new Error(`Row ${index + 1} requires +1/+3/+6 drought labels`);
     return row;
