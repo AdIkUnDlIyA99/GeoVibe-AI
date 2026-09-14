@@ -24,6 +24,11 @@ SPLITS = {
     for value in os.environ.get("FORECAST_SPLITS", "train,calibration,test").split(",")
     if value.strip()
 }
+LATITUDE_SAMPLES = max(10, int(os.environ.get("FORECAST_LATITUDE_SAMPLES", "34")))
+LONGITUDE_SAMPLES = max(20, int(os.environ.get("FORECAST_LONGITUDE_SAMPLES", "68")))
+ORIGIN_MONTH_STEP = int(os.environ.get("FORECAST_ORIGIN_MONTH_STEP", "3"))
+if ORIGIN_MONTH_STEP not in (1, 2, 3, 4, 6, 12):
+    raise RuntimeError("FORECAST_ORIGIN_MONTH_STEP must divide twelve months")
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 POINT_URL = "https://planetarycomputer.microsoft.com/api/data/v1/item/point/{lon},{lat}"
 
@@ -107,18 +112,18 @@ def candidates(dataset):
     time_lookup = {np.datetime_as_string(value, unit="M"): index for index, value in enumerate(times)}
     latitudes, longitudes = dataset[lat_name].values, dataset[lon_name].values
     rows = []
-    for lat_index in range(0, len(latitudes), max(1, len(latitudes) // 34)):
+    for lat_index in range(0, len(latitudes), max(1, len(latitudes) // LATITUDE_SAMPLES)):
         lat = float(latitudes[lat_index])
         if abs(lat) > 72:
             continue
-        for lon_index in range(0, len(longitudes), max(1, len(longitudes) // 68)):
+        for lon_index in range(0, len(longitudes), max(1, len(longitudes) // LONGITUDE_SAMPLES)):
             lon = float(longitudes[lon_index])
             region = f"spei-cell-{lat_index}-{lon_index}"
             for year in range(2018, 2025):
                 split = split_for(region, year)
                 if not split:
                     continue
-                for month in (3, 6, 9, 12):
+                for month in range(ORIGIN_MONTH_STEP, 13, ORIGIN_MONTH_STEP):
                     origin = datetime(year, month, 15, tzinfo=timezone.utc)
                     indices = []
                     for horizon in (1, 3, 6):
@@ -173,6 +178,7 @@ def main():
         f"Selected {len(selected)} candidates; {len(completed)} saved, "
         f"{len(attempted)} previously attempted, {len(pending)} pending; "
         f"splits={','.join(sorted(SPLITS))}; starting at {START_INDEX} with {WORKERS} workers",
+        f"grid={LATITUDE_SAMPLES}x{LONGITUDE_SAMPLES}, origin-step={ORIGIN_MONTH_STEP} month(s)",
         flush=True,
     )
 
