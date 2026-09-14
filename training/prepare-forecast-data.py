@@ -5,6 +5,7 @@ import json
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,9 @@ import xarray as xr
 SPEI_FILE = Path(os.environ.get("SPEI_FILE", "/content/drive/MyDrive/spei03.nc"))
 OUTPUT = Path(os.environ.get("FORECAST_OUTPUT", "/content/drive/MyDrive/forecast-sequences.jsonl"))
 TARGET = int(os.environ.get("FORECAST_SEQUENCES", "5000"))
+START_INDEX = max(1, int(os.environ.get("FORECAST_START_INDEX", "1")))
+WORKERS = max(1, min(8, int(os.environ.get("FORECAST_WORKERS", "4"))))
+ATTEMPTS = Path(os.environ.get("FORECAST_ATTEMPTS", str(OUTPUT.with_suffix(".attempts.jsonl"))))
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1/search"
 POINT_URL = "https://planetarycomputer.microsoft.com/api/data/v1/item/point/{lon},{lat}"
 
@@ -142,16 +146,43 @@ def main():
             if line.strip():
                 row = json.loads(line)
                 completed.add(f'{row["region"]}:{row["originDate"]}')
+    attempted = set()
+    if ATTEMPTS.exists():
+        for line in ATTEMPTS.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                attempted.add(json.loads(line)["key"])
     with xr.open_dataset(SPEI_FILE) as dataset:
         selected = candidates(dataset)
-    print(f"Selected {len(selected)} globally distributed spatiotemporal candidates; {len(completed)} already saved")
-    with OUTPUT.open("a", encoding="utf-8") as target:
-        for index, candidate in enumerate(selected, 1):
-            origin_date = candidate["origin"].date().isoformat()
-            key = f'{candidate["region"]}:{origin_date}'
-            if key in completed:
-                continue
+    pending = []
+    for index, candidate in enumerate(selected, 1):
+        if index < START_INDEX:
+            continue
+        key = f'{candidate["region"]}:{candidate["origin"].date().isoformat()}'
+        if key not in completed and key not in attempted:
+            pending.append((index, candidate, key))
+    print(
+        f"Selected {len(selected)} candidates; {len(completed)} saved, "
+        f"{len(attempted)} previously attempted, {len(pending)} pending; "
+        f"starting at {START_INDEX} with {WORKERS} workers",
+        flush=True,
+    )
+
+    def process(entry):
+        index, candidate, key = entry
+        try:
             sequence = sentinel_sequence(candidate["lat"], candidate["lon"], candidate["origin"])
+            return index, candidate, key, sequence, None
+        except RuntimeError as error:
+            return index, candidate, key, None, str(error)
+
+    ATTEMPTS.parent.mkdir(parents=True, exist_ok=True)
+    saved_this_run = 0
+    processed_this_run = 0
+    with OUTPUT.open("a", encoding="utf-8") as target, ATTEMPTS.open("a", encoding="utf-8") as attempts, ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        futures = [pool.submit(process, entry) for entry in pending]
+        for future in as_completed(futures):
+            index, candidate, key, sequence, error = future.result()
+            origin_date = candidate["origin"].date().isoformat()
             if sequence:
                 record = {
                     "region": candidate["region"], "split": candidate["split"], "originDate": origin_date,
@@ -161,7 +192,16 @@ def main():
                 }
                 target.write(json.dumps(record, separators=(",", ":")) + "\n")
                 target.flush()
-            print(f"[{index}/{len(selected)}] {key} {'saved' if sequence else 'skipped: incomplete 18-month sequence'}")
+                saved_this_run += 1
+            attempts.write(json.dumps({"key": key, "saved": bool(sequence), "error": error}, separators=(",", ":")) + "\n")
+            attempts.flush()
+            processed_this_run += 1
+            print(
+                f"[{index}/{len(selected)}] {key} "
+                f"{'saved' if sequence else ('skipped: ' + error if error else 'skipped: incomplete 18-month sequence')} "
+                f"| run: {saved_this_run}/{processed_this_run} saved",
+                flush=True,
+            )
     print(f"Forecast sequences written to {OUTPUT}")
 
 
