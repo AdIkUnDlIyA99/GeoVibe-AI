@@ -12,15 +12,21 @@ function features(sequence, originDate, seasonalForecast) {
   const recent3 = history.slice(-3), recent6 = history.slice(-6);
   const month = new Date(originDate).getUTCMonth();
   if (!Array.isArray(seasonalForecast) || seasonalForecast.length !== 6) throw new Error("Drought forecast requires six seasonal forecast months");
-  const seasonal = seasonalForecast.flatMap((item) => {
-    const values = [Number(item.t2m_mean), Number(item.t2m_spread), Number(item.tprate_mean), Number(item.tprate_spread)];
+  let cumulativeTemperature = 0, cumulativePrecipitation = 0;
+  const seasonal = seasonalForecast.flatMap((item, index) => {
+    const values = [Number(item.t2m_anomaly), Number(item.tprate_anomaly), Number(item.t2m_spread), Number(item.tprate_spread)];
     if (!values.every(Number.isFinite)) throw new Error("Drought forecast requires finite seasonal predictors");
-    const [temperature, temperatureSpread, precipitationRate, precipitationSpread] = values;
+    const [temperatureAnomaly, precipitationAnomaly, temperatureSpread, precipitationSpread] = values;
+    cumulativeTemperature += temperatureAnomaly;
+    cumulativePrecipitation += precipitationAnomaly;
     return [
-      clamp((temperature - 273.15) / 20, -3, 3),
+      clamp(temperatureAnomaly, -5, 5),
+      clamp(precipitationAnomaly, -5, 5),
       clamp(temperatureSpread / 10, 0, 3),
-      clamp(precipitationRate * 86400 / 10, 0, 3),
       clamp(precipitationSpread * 86400 / 10, 0, 3)
+      ,clamp(Math.max(0, temperatureAnomaly) * Math.max(0, -precipitationAnomaly), 0, 9)
+      ,clamp(cumulativeTemperature / (index + 1), -5, 5)
+      ,clamp(cumulativePrecipitation / (index + 1), -5, 5)
     ];
   });
   return [
