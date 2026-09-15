@@ -11,6 +11,7 @@
     "enrich:forecast": "python training/forecast/enrich-forecast-spei.py",
     "train:forecast": "node training/forecast/train-forecast.js",
     "train:drought": "node training/drought/train-drought-forecast.js",
+    "prepare:drought": "python training/prepare-drought-data.py",
     "test": "node --test"
   },
   "engines": {
