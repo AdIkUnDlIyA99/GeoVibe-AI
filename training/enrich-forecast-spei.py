@@ -100,6 +100,7 @@ def main():
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     temporary = OUTPUT.with_suffix(OUTPUT.suffix + ".tmp")
     written = 0
+    skipped = 0
     with SOURCE.open("r", encoding="utf-8") as source, temporary.open("w", encoding="utf-8") as target:
         for line_number, line in enumerate(source, 1):
             if not line.strip():
@@ -114,26 +115,40 @@ def main():
             lon_index = int(np.abs(longitudes - longitude).argmin())
             history = []
             fallback_radii = []
+            missing_reason = None
             for offset in range(-11, 1):
                 month = month_key(origin.year, origin.month, offset)
                 values = values_by_month.get(month)
                 value, radius = nearest_valid_value(values, lat_index, lon_index) if values is not None else (math.nan, None)
                 if not math.isfinite(value) or abs(value) >= 20:
-                    raise RuntimeError(f"Missing historical SPEI at source row {line_number}, offset {offset}")
+                    missing_reason = f"historical offset {offset}"
+                    break
                 fallback_radii.append(radius)
                 history.append(round(value, 4))
+            if missing_reason:
+                skipped += 1
+                print(
+                    f"Skipped source row {line_number}: no nearby valid SPEI for {missing_reason}",
+                    flush=True,
+                )
+                continue
             targets = []
             for horizon in (1, 3, 6):
                 month = month_key(origin.year, origin.month, horizon)
                 values = values_by_month.get(month)
                 value, radius = nearest_valid_value(values, lat_index, lon_index) if values is not None else (math.nan, None)
                 if not math.isfinite(value) or abs(value) >= 20:
-                    raise RuntimeError(
-                        f"Missing target SPEI at source row {line_number}, +{horizon} month ({month}); "
-                        "extend SPEI_SOURCE to cover every forecast target"
-                    )
+                    missing_reason = f"target +{horizon} month ({month})"
+                    break
                 fallback_radii.append(radius)
                 targets.append(round(value, 4))
+            if missing_reason:
+                skipped += 1
+                print(
+                    f"Skipped source row {line_number}: no nearby valid SPEI for {missing_reason}",
+                    flush=True,
+                )
+                continue
             if len(row.get("input", [])) != 12:
                 raise RuntimeError(f"Source row {line_number} does not contain twelve input months")
             for item, value in zip(row["input"], history):
@@ -148,7 +163,7 @@ def main():
             if written % 250 == 0:
                 print(f"Enriched {written} rows", flush=True)
     temporary.replace(OUTPUT)
-    print(f"Enriched {written} rows and wrote {OUTPUT}", flush=True)
+    print(f"Enriched {written} rows, skipped {skipped}, and wrote {OUTPUT}", flush=True)
 
 
 if __name__ == "__main__":
