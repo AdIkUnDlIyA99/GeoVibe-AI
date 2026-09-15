@@ -3,7 +3,7 @@ const HORIZONS = [1, 3, 6];
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const sigmoid = (value) => 1 / (1 + Math.exp(-clamp(value, -30, 30)));
 
-function features(sequence, originDate) {
+function features(sequence, originDate, seasonalForecast) {
   if (!Array.isArray(sequence) || sequence.length !== 12) throw new Error("Drought forecast requires exactly 12 monthly observations");
   const history = sequence.map((item) => item.spei === null || item.spei === undefined || item.spei === "" ? NaN : Number(item.spei) / 3);
   if (!history.every(Number.isFinite)) throw new Error("Drought forecast requires finite SPEI values");
@@ -11,10 +11,22 @@ function features(sequence, originDate) {
   const slope = (values) => (values.at(-1) - values[0]) / Math.max(1, values.length - 1);
   const recent3 = history.slice(-3), recent6 = history.slice(-6);
   const month = new Date(originDate).getUTCMonth();
+  if (!Array.isArray(seasonalForecast) || seasonalForecast.length !== 6) throw new Error("Drought forecast requires six seasonal forecast months");
+  const seasonal = seasonalForecast.flatMap((item) => {
+    const values = [Number(item.t2m_mean), Number(item.t2m_spread), Number(item.tprate_mean), Number(item.tprate_spread)];
+    if (!values.every(Number.isFinite)) throw new Error("Drought forecast requires finite seasonal predictors");
+    const [temperature, temperatureSpread, precipitationRate, precipitationSpread] = values;
+    return [
+      clamp((temperature - 273.15) / 20, -3, 3),
+      clamp(temperatureSpread / 10, 0, 3),
+      clamp(precipitationRate * 86400 / 10, 0, 3),
+      clamp(precipitationSpread * 86400 / 10, 0, 3)
+    ];
+  });
   return [
     1, ...history, history.at(-1), mean(recent3), mean(recent6),
     slope(recent3), slope(recent6), Math.min(...recent3), Math.min(...recent6),
-    Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12)
+    Math.sin(2 * Math.PI * month / 12), Math.cos(2 * Math.PI * month / 12), ...seasonal
   ];
 }
 
@@ -34,8 +46,8 @@ function raw(head, input) {
   return head.weights.reduce((sum, weight, index) => sum + weight * input[index], 0);
 }
 
-function predictDroughtForecast(model, sequence, originDate) {
-  const input = features(sequence, originDate);
+function predictDroughtForecast(model, sequence, originDate, seasonalForecast) {
+  const input = features(sequence, originDate, seasonalForecast);
   return model.heads.map((head, index) => {
     const calibration = model.calibration[index];
     return sigmoid(calibration.a * raw(head, input) + calibration.b);
@@ -43,7 +55,7 @@ function predictDroughtForecast(model, sequence, originDate) {
 }
 
 function trainDroughtForecast(rows, epochs = 300) {
-  const sample = features(rows[0].input, rows[0].originDate);
+  const sample = features(rows[0].input, rows[0].originDate, rows[0].seasonalForecast);
   const model = createDroughtForecast(sample.length);
   const positiveWeights = HORIZONS.map((_, horizon) => {
     const positives = rows.reduce((sum, row) => sum + row.targets.drought[horizon], 0);
@@ -52,7 +64,7 @@ function trainDroughtForecast(rows, epochs = 300) {
   for (let epoch = 0; epoch < epochs; epoch += 1) {
     const rate = 0.025 / Math.sqrt(1 + epoch / 40);
     for (const row of rows) {
-      const input = features(row.input, row.originDate);
+      const input = features(row.input, row.originDate, row.seasonalForecast);
       model.heads.forEach((head, horizon) => {
         const label = row.targets.drought[horizon];
         const error = (sigmoid(raw(head, input)) - label) * (label ? positiveWeights[horizon] : 1);
@@ -71,7 +83,7 @@ function fitDroughtCalibration(model, rows, epochs = 300) {
     for (let epoch = 0; epoch < epochs; epoch += 1) {
       let gradientA = 0, gradientB = 0;
       for (const row of rows) {
-        const score = raw(head, features(row.input, row.originDate));
+        const score = raw(head, features(row.input, row.originDate, row.seasonalForecast));
         const error = sigmoid(a * score + b) - row.targets.drought[horizon];
         gradientA += error * score;
         gradientB += error;
@@ -83,7 +95,7 @@ function fitDroughtCalibration(model, rows, epochs = 300) {
     return { a, b };
   });
   model.thresholds = model.heads.map((_, horizon) => {
-    const scored = rows.map((row) => ({ probability: predictDroughtForecast(model, row.input, row.originDate)[horizon], label: row.targets.drought[horizon] }));
+    const scored = rows.map((row) => ({ probability: predictDroughtForecast(model, row.input, row.originDate, row.seasonalForecast)[horizon], label: row.targets.drought[horizon] }));
     let best = { threshold: 0.5, score: -Infinity };
     for (let threshold = 0.1; threshold <= 0.9; threshold += 0.01) {
       const metric = binaryMetrics(scored.map((item) => item.probability), scored.map((item) => item.label), threshold);
@@ -113,7 +125,7 @@ function binaryMetrics(probabilities, labels, threshold) {
 
 function evaluateDroughtForecast(model, rows) {
   return HORIZONS.map((_, horizon) => binaryMetrics(
-    rows.map((row) => predictDroughtForecast(model, row.input, row.originDate)[horizon]),
+    rows.map((row) => predictDroughtForecast(model, row.input, row.originDate, row.seasonalForecast)[horizon]),
     rows.map((row) => row.targets.drought[horizon]),
     model.thresholds[horizon]
   ));
