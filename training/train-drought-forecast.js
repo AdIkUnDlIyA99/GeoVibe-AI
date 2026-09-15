@@ -11,6 +11,7 @@ function loadRows(file) {
     const row = JSON.parse(line);
     if (!Array.isArray(row.input) || row.input.length !== 12 || !row.input.every((item) => Number.isFinite(Number(item.spei)))) throw new Error(`Row ${index + 1} requires twelve SPEI observations`);
     if (!Array.isArray(row.targets?.drought) || row.targets.drought.length !== 3) throw new Error(`Row ${index + 1} requires +1/+3/+6 drought targets`);
+    if (!Array.isArray(row.seasonalForecast) || row.seasonalForecast.length !== 6) throw new Error(`Row ${index + 1} requires six seasonal forecast months; run the seasonal enricher first`);
     if (!["train", "calibration", "test"].includes(row.split) || !row.region || !row.originDate) throw new Error(`Row ${index + 1} has invalid split metadata`);
     return row;
   });
