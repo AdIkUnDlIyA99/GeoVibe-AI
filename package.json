@@ -5,11 +5,12 @@
   "description": "Single-date global Sentinel-2 monitoring with six-month NDVI, NDWI, flood and drought outlooks.",
   "scripts": {
     "start": "node server.js",
-    "train": "node training/train-sen1floods11.js",
-    "train:inventory": "set INVENTORY_ONLY=1&& node training/train-sen1floods11.js",
-    "prepare:forecast": "python training/prepare-forecast-data.py",
-    "enrich:forecast": "python training/enrich-forecast-spei.py",
-    "train:forecast": "node training/train-forecast.js",
+    "train": "node training/flood/train-sen1floods11.js",
+    "train:inventory": "set INVENTORY_ONLY=1&& node training/flood/train-sen1floods11.js",
+    "prepare:forecast": "python training/forecast/prepare-forecast-data.py",
+    "enrich:forecast": "python training/forecast/enrich-forecast-spei.py",
+    "train:forecast": "node training/forecast/train-forecast.js",
+    "train:drought": "node training/drought/train-drought-forecast.js",
     "test": "node --test"
   },
   "engines": {
