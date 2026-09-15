@@ -64,6 +64,29 @@ def load_spei_source(path):
     return latitudes, longitudes, values_by_month, title
 
 
+def nearest_valid_value(values, lat_index, lon_index, max_radius=4):
+    """Return the nearest finite land cell, searching no farther than about one degree."""
+    latitude_count, longitude_count = values.shape
+    for radius in range(max_radius + 1):
+        candidates = []
+        for lat_offset in range(-radius, radius + 1):
+            for lon_offset in range(-radius, radius + 1):
+                if radius and max(abs(lat_offset), abs(lon_offset)) != radius:
+                    continue
+                candidate_lat = lat_index + lat_offset
+                if candidate_lat < 0 or candidate_lat >= latitude_count:
+                    continue
+                candidate_lon = (lon_index + lon_offset) % longitude_count
+                value = float(values[candidate_lat, candidate_lon])
+                if math.isfinite(value) and abs(value) < 20:
+                    distance = lat_offset * lat_offset + lon_offset * lon_offset
+                    candidates.append((distance, value))
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            return candidates[0][1], radius
+    return math.nan, None
+
+
 def main():
     if not SPEI_SOURCE.exists():
         raise RuntimeError(f"SPEI NetCDF source not found at {SPEI_SOURCE}")
@@ -90,23 +113,26 @@ def main():
             lat_index = int(np.abs(latitudes - latitude).argmin())
             lon_index = int(np.abs(longitudes - longitude).argmin())
             history = []
+            fallback_radii = []
             for offset in range(-11, 1):
                 month = month_key(origin.year, origin.month, offset)
                 values = values_by_month.get(month)
-                value = float(values[lat_index, lon_index]) if values is not None else math.nan
+                value, radius = nearest_valid_value(values, lat_index, lon_index) if values is not None else (math.nan, None)
                 if not math.isfinite(value) or abs(value) >= 20:
                     raise RuntimeError(f"Missing historical SPEI at source row {line_number}, offset {offset}")
+                fallback_radii.append(radius)
                 history.append(round(value, 4))
             targets = []
             for horizon in (1, 3, 6):
                 month = month_key(origin.year, origin.month, horizon)
                 values = values_by_month.get(month)
-                value = float(values[lat_index, lon_index]) if values is not None else math.nan
+                value, radius = nearest_valid_value(values, lat_index, lon_index) if values is not None else (math.nan, None)
                 if not math.isfinite(value) or abs(value) >= 20:
                     raise RuntimeError(
                         f"Missing target SPEI at source row {line_number}, +{horizon} month ({month}); "
                         "extend SPEI_SOURCE to cover every forecast target"
                     )
+                fallback_radii.append(radius)
                 targets.append(round(value, 4))
             if len(row.get("input", [])) != 12:
                 raise RuntimeError(f"Source row {line_number} does not contain twelve input months")
@@ -116,6 +142,7 @@ def main():
             row["sources"].append(f"{source_title}; lagged 12-month SPEI-3 climate history")
             row["targets"]["spei"] = targets
             row["targets"]["drought"] = [int(value <= -1) for value in targets]
+            row["speiGridFallbackCells"] = max(fallback_radii)
             target.write(json.dumps(row, separators=(",", ":")) + "\n")
             written += 1
             if written % 250 == 0:
