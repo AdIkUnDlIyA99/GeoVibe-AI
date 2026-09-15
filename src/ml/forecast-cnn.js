@@ -5,7 +5,7 @@ const FUTURE_MONTHS = 6;
 const DROUGHT_HORIZONS = [1, 3, 6];
 const POSITIONS = 12 - KERNEL + 1;
 const FEATURES = FILTERS * POSITIONS;
-const CLIMATE_FEATURES = 12;
+const CLIMATE_FEATURES = 18;
 
 const clamp = (value, min = -1, max = 1) => Math.max(min, Math.min(max, value));
 const sigmoid = (value) => 1 / (1 + Math.exp(-clamp(value, -30, 30)));
@@ -24,8 +24,8 @@ function createForecastCnn() {
     weights: Array.from({ length: features }, (_, index) => zero ? 0 : seededWeight(offset + output * 131 + index) * 0.35)
   }));
   return {
-    schemaVersion: 3,
-    architecture: "order-preserving satellite CNN with residual index heads and lagged-SPEI drought heads",
+    schemaVersion: 4,
+    architecture: "order-preserving satellite CNN with calibrated index baselines and lagged-SPEI trend drought heads",
     sequenceLength: 12,
     channels: ["NDVI", "NDWI", "VALID_MASK"],
     filters,
@@ -43,7 +43,20 @@ function normalizeSequence(sequence) {
   if (!Array.isArray(sequence) || sequence.length !== 12) throw new Error("Forecast CNN requires exactly 12 monthly observations");
   const input = sequence.map((item) => [clamp(Number(item.ndvi) || 0), clamp(Number(item.ndwi) || 0), item.valid === false ? 0 : 1]);
   const hasClimate = sequence.every((item) => Number.isFinite(Number(item.spei)));
-  const climate = sequence.map((item) => hasClimate ? clamp(Number(item.spei) / 3) : 0);
+  const climateHistory = sequence.map((item) => hasClimate ? clamp(Number(item.spei) / 3) : 0);
+  const mean = (values) => values.reduce((sum, value) => sum + value, 0) / values.length;
+  const slope = (values) => (values.at(-1) - values[0]) / Math.max(1, values.length - 1);
+  const recent3 = climateHistory.slice(-3);
+  const recent6 = climateHistory.slice(-6);
+  const climate = [
+    ...climateHistory,
+    climateHistory.at(-1),
+    mean(recent3),
+    mean(recent6),
+    slope(recent3),
+    slope(recent6),
+    Math.min(...recent6)
+  ];
   return { input, climate, hasClimate };
 }
 
@@ -92,7 +105,7 @@ function trainForecastCnn(rows, epochs = 100) {
   const model = createForecastCnn();
   const positiveWeight = DROUGHT_HORIZONS.map((_, index) => {
     const positives = rows.reduce((sum, row) => sum + row.targets.drought[index], 0);
-    return (rows.length - positives) / Math.max(1, positives);
+    return Math.sqrt((rows.length - positives) / Math.max(1, positives));
   });
   for (let epoch = 0; epoch < epochs; epoch += 1) {
     const rate = 0.004 / Math.sqrt(1 + epoch / 20);
