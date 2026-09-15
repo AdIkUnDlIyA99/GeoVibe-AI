@@ -31,6 +31,7 @@ function createForecastCnn() {
     filters,
     indexHeads: { ndvi: head(FUTURE_MONTHS, 100, FEATURES, true), ndwi: head(FUTURE_MONTHS, 300, FEATURES, true) },
     indexBlend: { ndvi: Array(FUTURE_MONTHS).fill(1), ndwi: Array(FUTURE_MONTHS).fill(1) },
+    indexBaselineMix: { ndvi: Array(FUTURE_MONTHS).fill(0), ndwi: Array(FUTURE_MONTHS).fill(0) },
     droughtHeads: head(DROUGHT_HORIZONS.length, 500, FEATURES + CLIMATE_FEATURES),
     droughtHorizons: DROUGHT_HORIZONS,
     calibration: DROUGHT_HORIZONS.map(() => ({ a: 1, b: 0 })),
@@ -69,7 +70,11 @@ function predictForecast(model, sequence) {
   const state = encode(model, sequence);
   const index = {};
   for (const key of ["ndvi", "ndwi"]) index[key] = model.indexHeads[key].map((head, horizon) => {
-    const baseline = horizon === 0 ? state.input.at(-1)[key === "ndvi" ? 0 : 1] : state.input[horizon][key === "ndvi" ? 0 : 1];
+    const channel = key === "ndvi" ? 0 : 1;
+    const persistence = state.input.at(-1)[channel];
+    const seasonal = horizon === 0 ? persistence : state.input[horizon][channel];
+    const persistenceMix = model.indexBaselineMix?.[key]?.[horizon] ?? 0;
+    const baseline = seasonal * (1 - persistenceMix) + persistence * persistenceMix;
     const blend = model.indexBlend?.[key]?.[horizon] ?? 1;
     return clamp(baseline + blend * linear(head, state.pooled));
   });
@@ -137,22 +142,28 @@ function trainForecastCnn(rows, epochs = 100) {
 
 function fitForecastCalibration(model, rows, epochs = 250) {
   model.indexBlend = { ndvi: [], ndwi: [] };
+  model.indexBaselineMix = { ndvi: [], ndwi: [] };
   for (const key of ["ndvi", "ndwi"]) {
     for (let horizon = 0; horizon < FUTURE_MONTHS; horizon += 1) {
-      let best = { blend: 0, mse: Infinity };
-      for (let blend = 0; blend <= 1.0001; blend += 0.05) {
-        let squaredError = 0;
-        for (const row of rows) {
-          const state = encode(model, row.input);
-          const channel = key === "ndvi" ? 0 : 1;
-          const baseline = horizon === 0 ? state.input.at(-1)[channel] : state.input[horizon][channel];
-          const predicted = clamp(baseline + blend * linear(model.indexHeads[key][horizon], state.pooled));
-          squaredError += (predicted - row.targets[key][horizon]) ** 2;
+      let best = { blend: 0, persistenceMix: 0, mse: Infinity };
+      for (let persistenceMix = 0; persistenceMix <= 1.0001; persistenceMix += 0.1) {
+        for (let blend = 0; blend <= 1.5001; blend += 0.05) {
+          let squaredError = 0;
+          for (const row of rows) {
+            const state = encode(model, row.input);
+            const channel = key === "ndvi" ? 0 : 1;
+            const persistence = state.input.at(-1)[channel];
+            const seasonal = horizon === 0 ? persistence : state.input[horizon][channel];
+            const baseline = seasonal * (1 - persistenceMix) + persistence * persistenceMix;
+            const predicted = clamp(baseline + blend * linear(model.indexHeads[key][horizon], state.pooled));
+            squaredError += (predicted - row.targets[key][horizon]) ** 2;
+          }
+          const mse = squaredError / rows.length;
+          if (mse < best.mse) best = { blend, persistenceMix, mse };
         }
-        const mse = squaredError / rows.length;
-        if (mse < best.mse) best = { blend, mse };
       }
       model.indexBlend[key][horizon] = Number(best.blend.toFixed(2));
+      model.indexBaselineMix[key][horizon] = Number(best.persistenceMix.toFixed(2));
     }
   }
   model.calibration = model.droughtHeads.map((head, horizon) => {
@@ -189,7 +200,7 @@ function fitForecastCalibration(model, rows, epochs = 250) {
       const balancedAccuracy = (recall + specificity) / 2;
       // Select on calibration only, with margin above both deployment floors.
       const clearsSafetyMargin = balancedAccuracy >= 0.62 && f1 >= 0.55;
-      const score = (clearsSafetyMargin ? 10 : 0) + f1 + 0.25 * balancedAccuracy;
+      const score = (clearsSafetyMargin ? 10 : 0) + balancedAccuracy + f1;
       if (score > best.score) best = { threshold, score };
     }
     return best.threshold;
