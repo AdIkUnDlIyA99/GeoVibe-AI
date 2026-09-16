@@ -27,7 +27,12 @@ def coordinate_name(dataset, candidates):
 
 
 def discharge_name(dataset):
-    for name in ("dis24", "river_discharge_in_the_last_24_hours", "discharge"):
+    for name in (
+        "dis24",
+        "average_river_discharge_in_the_last_24_hours",
+        "river_discharge_in_the_last_24_hours",
+        "discharge",
+    ):
         if name in dataset.data_vars:
             return name
     raise RuntimeError(f"No discharge variable found; available: {list(dataset.data_vars)}")
