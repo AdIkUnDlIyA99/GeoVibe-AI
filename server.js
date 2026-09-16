@@ -1,26 +1,24 @@
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
-const { Readable } = require("node:stream");
-const { buildPassport } = require("./src/analysis/passport");
 const { forecastSeries } = require("./src/analysis/timeseries");
-const { probability: droughtProbability } = require("./src/ml/drought-cnn");
 const { inferGrid } = require("./src/ml/flood-cnn");
 const { predictForecast } = require("./src/ml/forecast-cnn");
 
 const ROOT = __dirname;
 const PUBLIC = path.join(ROOT, "public");
-const FLOOD_MODEL_PATH = path.join(ROOT, "models", "flood-cnn.json");
-const DROUGHT_MODEL_PATH = path.join(ROOT, "models", "drought-cnn.json");
-const FORECAST_MODEL_PATH = path.join(ROOT, "models", "forecast-cnn.json");
+const FLOOD_MODEL_PATH = path.join(ROOT, "models", "flood", "flood-cnn.json");
+const DROUGHT_MODEL_PATH = path.join(ROOT, "models", "drought", "drought-forecast.json");
+const FORECAST_MODEL_PATH = path.join(ROOT, "models", "forecast", "forecast-cnn.json");
 const geocodeCache = new Map();
 const satelliteCache = new Map();
 const STAC_SEARCH = "https://planetarycomputer.microsoft.com/api/stac/v1/search";
 const DATA_API = "https://planetarycomputer.microsoft.com/api/data/v1/item";
-const SENTINEL_COLLECTION = "sentinel-2-l2a";
+const SENTINEL_COLLECTIONS = ["sentinel-2-l2a", "sentinel-2-l1c"];
 const CACHE_LIMIT = 100;
 const TARGET_OBSERVATIONS = 12;
-const CAPTURE_TOLERANCE_DAYS = 40;
+const CAPTURE_TOLERANCE_DAYS = 65;
+const SCENE_CANDIDATES_PER_TARGET = 6;
 const IMAGE_RADIUS_DEGREES = 0.025;
 const SAMPLE_RADIUS_DEGREES = 0.018;
 const SAMPLE_GRID_SIZE = 9;
@@ -33,6 +31,14 @@ function loadForecastModel() {
   if (!fs.existsSync(FORECAST_MODEL_PATH)) return null;
   const model = JSON.parse(fs.readFileSync(FORECAST_MODEL_PATH, "utf8"));
   return model.metadata?.status?.startsWith("accepted") ? model : null;
+}
+
+function forecastSequence(observations) {
+  if (observations.length >= 12) return observations.slice(-12).map((item) => ({ ...item.indices, valid: true }));
+  return Array.from({ length: 12 }, (_, index) => {
+    const sourceIndex = Math.round(index * (observations.length - 1) / 11);
+    return { ...observations[sourceIndex].indices, valid: false };
+  });
 }
 function json(res, status, payload) {
   res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer" });
@@ -139,8 +145,8 @@ function targetDates(start, end, count = TARGET_OBSERVATIONS) {
 function forecast(observations) {
   const dates = observations.map((item) => item.date);
   const trainedModel = loadForecastModel();
-  if (trainedModel && observations.length >= 12) {
-    const sequence = observations.slice(-12).map((item) => ({ ...item.indices, valid: true }));
+  if (trainedModel && observations.length >= 2) {
+    const sequence = forecastSequence(observations);
     const prediction = predictForecast(trainedModel, sequence);
     const lastDate = new Date(dates.at(-1));
     const futureDates = Array.from({ length: 6 }, (_, index) => addMonths(lastDate, index + 1).toISOString());
@@ -161,6 +167,8 @@ function forecast(observations) {
         return [month, accepted ? prediction.drought[index] : null];
       })),
       modelStatus: "accepted-trained-cnn",
+      inputCoverage: observations.length >= 12 ? "complete" : "partial-validity-masked",
+      inputObservations: observations.length,
       uncertainty: "95% empirical error bands derived from geographically and temporally held-out RMSE"
     };
   }
@@ -185,45 +193,45 @@ function forecast(observations) {
 
 function modelLinkedHazards(observations, indexForecast, floodModel, droughtModel) {
   const origin = observations.at(-1);
-  const observedSequence = observations.map((item) => ({ ...item.indices, valid: true })).slice(-12);
-  while (observedSequence.length < 12) observedSequence.unshift({ ...observedSequence[0], valid: false });
-  const projectedSequence = observedSequence.slice();
+  const currentFlood = inferGrid(floodModel, origin.spatialSamples);
+  const oneMonthDrought = indexForecast.droughtForecast?.[1];
   const horizons = indexForecast.futureDates.map((date, index) => {
+    const month = index + 1;
     const ndvi = indexForecast.trajectories.ndvi.future[index];
     const ndwi = indexForecast.trajectories.ndwi.future[index];
-    projectedSequence.push({ ndvi, ndwi, valid: true });
-    const shiftedGrid = origin.spatialSamples.map((cell) => ({
-      ...cell,
-      ndvi: clamp(cell.ndvi + ndvi - origin.indices.ndvi),
-      ndwi: clamp(cell.ndwi + ndwi - origin.indices.ndwi)
-    }));
-    const flood = inferGrid(floodModel, shiftedGrid);
-    const forecastDrought = indexForecast.droughtForecast?.[index + 1];
+    const forecastDrought = indexForecast.droughtForecast?.[month];
+    const projectsOneMonth = month === 6 && forecastDrought == null && Number.isFinite(oneMonthDrought);
     return {
-      month: index + 1,
+      month,
       date,
       ndvi,
       ndwi,
-      flood: flood ? +flood.temporaryWaterFraction.toFixed(4) : null,
-      drought: forecastDrought !== undefined ? forecastDrought : (droughtModel.metadata?.status === "trained" ? +droughtProbability(droughtModel, projectedSequence.slice(-12)).toFixed(4) : null)
+      flood: null,
+      drought: forecastDrought ?? (projectsOneMonth ? oneMonthDrought : null),
+      droughtProjection: projectsOneMonth ? { sourceMonth: 1, method: "constant-risk projection", independentlyValidated: false } : null
     };
   });
   const final = horizons.at(-1);
   const ndviDelta = +(final.ndvi - origin.indices.ndvi).toFixed(3);
   const ndwiDelta = +(final.ndwi - origin.indices.ndwi).toFixed(3);
   return {
+    currentFlood: currentFlood ? {
+      temporaryWaterFraction: +currentFlood.temporaryWaterFraction.toFixed(4),
+      peakProbability: +currentFlood.peakProbability.toFixed(4),
+      status: "observed-flood-water-evidence"
+    } : null,
     horizons,
     connection: {
       ndviDelta,
       ndwiDelta,
-      floodExplanation: `Projected NDWI ${ndwiDelta >= 0 ? "rises" : "falls"} by ${Math.abs(ndwiDelta).toFixed(2)}; the flood-water CNN evaluates that projected spectral state.`,
+      floodExplanation: "Future flood risk is withheld until a rainfall, terrain, soil-moisture and hydrology model passes held-out validation. NDWI forecasts alone are not treated as flood predictions.",
       droughtExplanation: final.drought === null ? "The drought model abstained because this horizon or its required climate input was not accepted." : `Projected NDVI ${ndviDelta >= 0 ? "rises" : "falls"} by ${Math.abs(ndviDelta).toFixed(2)} and NDWI ${ndwiDelta >= 0 ? "rises" : "falls"}; the temporal model evaluates the available history.`
     },
     validation: {
       flood: { ...floodModel.metrics, scope: "Current flood-water detection; future susceptibility is not separately validated." },
-      drought: { ...droughtModel.metrics, status: droughtModel.metadata?.status, scope: "Current SPEI drought classification; future susceptibility is not separately validated." }
+      drought: { metrics: droughtModel.metrics, deployment: droughtModel.deployment, status: droughtModel.metadata?.status, scope: "Multi-horizon SPEI-3 forecast. Runtime abstains when live SPEI and seasonal predictors are unavailable." }
     },
-    warning: indexForecast.modelStatus === "accepted-trained-cnn" ? "Research forecast from an accepted held-out temporal CNN; not an official event warning." : "Experimental six-month susceptibility generated from forecast spectral states; not an event or weather forecast."
+    warning: "NDVI and NDWI are research forecasts. Flood is current observed evidence only; future flood risk is unavailable until a separately validated hydrological model is installed."
   };
 }
 async function searchSentinelItems(lat, lon, start, end) {
@@ -231,11 +239,11 @@ async function searchSentinelItems(lat, lon, start, end) {
     method: "POST",
     headers: { "content-type": "application/json", "user-agent": "GeoVibe-AI academic-project" },
     body: JSON.stringify({
-      collections: [SENTINEL_COLLECTION],
+      collections: SENTINEL_COLLECTIONS,
       bbox: [lon - 0.001, lat - 0.001, lon + 0.001, lat + 0.001],
-      datetime: `${addDays(start, -35).toISOString()}/${addDays(end, 35).toISOString()}`,
-      limit: 100,
-      query: { "eo:cloud_cover": { lt: 45 } }
+      datetime: `${addDays(start, -CAPTURE_TOLERANCE_DAYS).toISOString()}/${addDays(end, CAPTURE_TOLERANCE_DAYS).toISOString()}`,
+      limit: 200,
+      query: { "eo:cloud_cover": { lt: 70 } }
     })
   });
   if (!response.ok) throw new Error(`Sentinel catalog request failed (${response.status})`);
@@ -243,15 +251,18 @@ async function searchSentinelItems(lat, lon, start, end) {
   return data.features || [];
 }
 async function sampleSentinelPoint(item, lat, lon) {
+  const collection = SENTINEL_COLLECTIONS.includes(item.collection) ? item.collection : "sentinel-2-l2a";
   const endpoint = new URL(`${DATA_API}/point/${lon},${lat}`);
-  endpoint.searchParams.set("collection", SENTINEL_COLLECTION);
+  endpoint.searchParams.set("collection", collection);
   endpoint.searchParams.set("item", item.id);
-  for (const asset of ["B03", "B04", "B08", "SCL"]) endpoint.searchParams.append("assets", asset);
+  const spectralAssets = ["B03", "B04", "B08"];
+  const assets = collection === "sentinel-2-l2a" ? [...spectralAssets, "SCL"] : spectralAssets;
+  for (const asset of assets) endpoint.searchParams.append("assets", asset);
   const response = await fetchWithRetry(endpoint, {}, 2);
   if (!response.ok) return null;
   const point = await response.json();
   const bands = Object.fromEntries(point.band_names.map((name, index) => [name.split("_")[0], Number(point.values[index])]));
-  if (!["B03", "B04", "B08"].every((name) => Number.isFinite(bands[name]) && bands[name] > 0)) return null;
+  if (!spectralAssets.every((name) => Number.isFinite(bands[name]) && bands[name] > 0)) return null;
   if (Number.isFinite(bands.SCL) && ![2, 4, 5, 6, 7].includes(Math.round(bands.SCL))) return null;
   const ratio = (a, b) => +(Math.abs(a + b) < 1e-9 ? 0 : (a - b) / (a + b)).toFixed(3);
   const indices = {
@@ -290,22 +301,22 @@ async function sampleSentinelItem(item, lat, lon) {
       return null;
     }
   })).filter(Boolean);
-  if (samples.length < 5) return null;
+  if (samples.length < 3) return null;
   const indices = { ndvi: +median(samples.map((sample) => sample.ndvi)).toFixed(3), ndwi: +median(samples.map((sample) => sample.ndwi)).toFixed(3) };
   const dispersion = {
     ndvi: +(Math.max(...samples.map((sample) => sample.ndvi)) - Math.min(...samples.map((sample) => sample.ndvi))).toFixed(3),
     ndwi: +(Math.max(...samples.map((sample) => sample.ndwi)) - Math.min(...samples.map((sample) => sample.ndwi))).toFixed(3)
   };
-  return { id: item.id, date: item.properties.datetime, cloudCover: +Number(item.properties["eo:cloud_cover"] || 0).toFixed(1), indices, features: [indices.ndvi, indices.ndwi], sampleCount: samples.length, dispersion, spatialSamples: samples };
+  return { id: item.id, collection: item.collection, date: item.properties.datetime, cloudCover: +Number(item.properties["eo:cloud_cover"] || 0).toFixed(1), indices, features: [indices.ndvi, indices.ndwi], sampleCount: samples.length, dispersion, spatialSamples: samples };
 }
 async function satelliteObservations(lat, lon, start, end) {
   const items = await searchSentinelItems(lat, lon, start, end);
   if (!items.length) throw new Error("No Sentinel-2 coverage was found for this location and date range");
   const targets = targetDates(start, end);
   const choices = targets.map((target) => items.slice().sort((a, b) => {
-    const score = (item) => Math.abs(new Date(item.properties.datetime) - target) / 86400000 + Number(item.properties["eo:cloud_cover"] || 100) * 2;
+    const score = (item) => Math.abs(new Date(item.properties.datetime) - target) / 86400000 + Number(item.properties["eo:cloud_cover"] || 100) * 1.25 + (item.collection === "sentinel-2-l2a" ? 0 : 8);
     return score(a) - score(b);
-  }).slice(0, 3));
+  }).slice(0, SCENE_CANDIDATES_PER_TARGET));
   const samples = await mapLimit(choices, 4, async (candidates, targetIndex) => {
     for (const item of candidates) {
       const sample = await sampleSentinelItem(item, lat, lon);
@@ -313,10 +324,9 @@ async function satelliteObservations(lat, lon, start, end) {
     }
     return null;
   });
-  const unique = [...new Map(samples.filter(Boolean).map((sample) => [sample.id, sample])).values()]
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-  if (unique.length < 2) throw new Error("Fewer than two usable Sentinel-2 observations were returned. Check internet access or choose a nearby date/location.");
-  return unique;
+  const monthly = samples.filter(Boolean).sort((a, b) => new Date(a.targetDate) - new Date(b.targetDate));
+  if (monthly.length < 2) throw new Error("Fewer than two usable Sentinel-2 observations were returned. Check internet access or choose a nearby date/location.");
+  return monthly;
 }
 function selectCapture(observations, requestedDate, label) {
   const ranked = observations.map((sample) => ({ sample, offsetDays: Math.round(Math.abs(new Date(sample.date) - requestedDate) / 86400000) }))
@@ -329,7 +339,7 @@ function selectCapture(observations, requestedDate, label) {
   return { ...ranked[0].sample, requestedDate: requestedDate.toISOString(), offsetDays: ranked[0].offsetDays };
 }
 function imagePath(sample, lat, lon) {
-  return `/api/satellite-image?item=${encodeURIComponent(sample.id)}&lat=${lat}&lon=${lon}`;
+  return `/api/satellite-image?collection=${encodeURIComponent(sample.collection)}&item=${encodeURIComponent(sample.id)}&lat=${lat}&lon=${lon}`;
 }
 async function analyze(payload) {
   const lat = Number(payload.coordinates?.lat);
@@ -360,13 +370,13 @@ async function analyze(payload) {
     indices: originSample.indices,
     hazards: hazardForecast,
     modelValidation: { ...floodModel.metrics, ...floodModel.metadata },
-    droughtValidation: { ...droughtModel.metrics, ...droughtModel.metadata },
+    droughtValidation: { metrics: droughtModel.metrics, deployment: droughtModel.deployment, ...droughtModel.metadata },
     forecast: indexForecast,
     imagery: {
       observed: { url: imagePath(originSample, lat, lon), date: originSample.date, requestedDate: originSample.requestedDate, offsetDays: originSample.offsetDays, cloudCover: originSample.cloudCover }
     },
     source: {
-      name: "Copernicus Sentinel-2 L2A",
+      name: `Copernicus Sentinel-2 ${[...new Set(observations.map((item) => item.collection === "sentinel-2-l1c" ? "L1C" : "L2A"))].join(" + ")}`,
       provider: "Microsoft Planetary Computer",
       observations: observations.length,
       targetObservations: TARGET_OBSERVATIONS,
@@ -395,21 +405,23 @@ const server = http.createServer(async (req, res) => {
     if (requestUrl.pathname === "/api/analyze" && req.method === "POST") return json(res, 200, await analyze(await body(req)));
     if (requestUrl.pathname === "/api/satellite-image" && req.method === "GET") {
       const item = requestUrl.searchParams.get("item") || "";
+      const collection = requestUrl.searchParams.get("collection") || "sentinel-2-l2a";
       const lat = Number(requestUrl.searchParams.get("lat"));
       const lon = Number(requestUrl.searchParams.get("lon"));
-      if (!/^[A-Za-z0-9_-]+$/.test(item) || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return json(res, 400, { error: "Invalid imagery request" });
+      if (!SENTINEL_COLLECTIONS.includes(collection) || !/^[A-Za-z0-9_-]+$/.test(item) || !Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return json(res, 400, { error: "Invalid imagery request" });
       const latRadius = IMAGE_RADIUS_DEGREES;
       const lonRadius = latRadius / Math.max(0.25, Math.cos(lat * Math.PI / 180));
       const endpoint = new URL(`${DATA_API}/bbox/${lon-lonRadius},${lat-latRadius},${lon+lonRadius},${lat+latRadius}/720x480.png`);
-      endpoint.searchParams.set("collection", SENTINEL_COLLECTION);
+      endpoint.searchParams.set("collection", collection);
       endpoint.searchParams.set("item", item);
       endpoint.searchParams.set("assets", "visual");
       endpoint.searchParams.set("asset_bidx", "visual|1,2,3");
       endpoint.searchParams.set("nodata", "0");
       const imageResponse = await fetchWithRetry(endpoint, {}, 2);
       if (!imageResponse.ok || !imageResponse.body) return json(res, 502, { error: "Satellite image unavailable" });
-      res.writeHead(200, { "Content-Type": imageResponse.headers.get("content-type") || "image/png", "Cache-Control": "public, max-age=1800" });
-      return Readable.fromWeb(imageResponse.body).pipe(res);
+      const image = Buffer.from(await imageResponse.arrayBuffer());
+      res.writeHead(200, { "Content-Type": imageResponse.headers.get("content-type") || "image/png", "Content-Length": image.length, "Cache-Control": "public, max-age=1800" });
+      return res.end(image);
     }
     if (requestUrl.pathname === "/api/train") return json(res, 404, { error: "Model training is available only through the local npm run train command" });
     const requestPath = requestUrl.pathname === "/" ? "/index.html" : requestUrl.pathname;
