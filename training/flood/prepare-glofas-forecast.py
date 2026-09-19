@@ -29,6 +29,7 @@ def coordinate_name(dataset, candidates):
 def discharge_name(dataset):
     for name in (
         "dis24",
+        "avg_dis",
         "average_river_discharge_in_the_last_24_hours",
         "river_discharge_in_the_last_24_hours",
         "discharge",
