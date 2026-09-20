@@ -65,7 +65,14 @@ def lead_indices(dataset):
         lead_name = coordinate_name(dataset, ("forecast_period", "step", "leadtime"))
         values = np.asarray(dataset[lead_name].values).reshape(-1)
         days = values / np.timedelta64(1, "D") if np.issubdtype(values.dtype, np.timedelta64) else values.astype(float)
-    return [int(np.argmin(np.abs(days - target))) for target in TARGET_DAYS]
+    indices = [int(np.argmin(np.abs(days - target))) for target in TARGET_DAYS]
+    for target, index in zip(TARGET_DAYS, indices):
+        if abs(float(days[index]) - float(target)) > 20:
+            raise RuntimeError(
+                f"Seasonal reforecast lacks a usable {target}-day lead; "
+                f"nearest available lead is {days[index]} days"
+            )
+    return indices
 
 
 def origin_time(dataset):
