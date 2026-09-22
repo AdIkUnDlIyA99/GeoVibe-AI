@@ -4,7 +4,8 @@
   "private": true,
   "description": "Single-date global Sentinel-2 monitoring with six-month NDVI, NDWI, flood and drought outlooks.",
   "scripts": {
-    "start": "node server.js",
+    "start": "python app.py",
+    "start:node": "node server.js",
     "train": "node training/flood/train-sen1floods11.js",
     "train:inventory": "set INVENTORY_ONLY=1&& node training/flood/train-sen1floods11.js",
     "prepare:flood-forecast": "python training/flood/prepare-glofas-forecast.py",
