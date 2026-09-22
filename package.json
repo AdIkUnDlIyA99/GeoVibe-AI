@@ -7,11 +7,16 @@
     "start": "node server.js",
     "train": "node training/flood/train-sen1floods11.js",
     "train:inventory": "set INVENTORY_ONLY=1&& node training/flood/train-sen1floods11.js",
+    "prepare:flood-forecast": "python training/flood/prepare-glofas-forecast.py",
+    "train:flood-forecast": "node training/flood/train-glofas-forecast.js",
+    "prepare:flood-plus1": "python training/flood/prepare-glofas-plus1.py",
+    "train:flood-plus1": "node training/flood/train-glofas-plus1.js",
     "prepare:forecast": "python training/forecast/prepare-forecast-data.py",
     "enrich:forecast": "python training/forecast/enrich-forecast-spei.py",
     "train:forecast": "node training/forecast/train-forecast.js",
     "train:drought": "node training/drought/train-drought-forecast.js",
     "prepare:drought": "python training/prepare-drought-data.py",
+    "enrich:drought-seasonal": "python training/enrich-drought-seasonal.py",
     "test": "node --test"
   },
   "engines": {
