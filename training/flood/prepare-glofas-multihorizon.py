@@ -1,157 +1,131 @@
-"""Build efficient supervised +1/+3/+6 month GloFAS flood training rows."""
+"""Train calibrated gradient-boosted GloFAS classifiers for +1/+3/+6 months."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
 
+import joblib
 import numpy as np
-import pandas as pd
-import xarray as xr
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.isotonic import IsotonicRegression
+from sklearn.metrics import balanced_accuracy_score, brier_score_loss, f1_score, precision_score, recall_score
 
 
-SEASONAL_SOURCE = Path(os.environ.get("GLOFAS_SEASONAL_SOURCE", "/content/drive/MyDrive/glofas-seasonal-1-3-6"))
-HISTORICAL_SOURCE = Path(os.environ.get("GLOFAS_HISTORICAL_SOURCE", "/content/drive/MyDrive/glofas-historical-1981-2025"))
-OUTPUT = Path(os.environ.get("FLOOD_FORECAST_OUTPUT", "/content/drive/MyDrive/glofas-flood-sequences-1-3-6.jsonl"))
-GRID_STRIDE = max(1, int(os.environ.get("GLOFAS_GRID_STRIDE", "4")))
-BASELINE_END = np.datetime64(os.environ.get("GLOFAS_BASELINE_END", "2016-12-31"))
+DATASET = Path(os.environ.get("FLOOD_FORECAST_DATASET", "/content/drive/MyDrive/glofas-flood-sequences-1-3-6.jsonl"))
+OUTPUT = Path(os.environ.get("FLOOD_TREE_MODEL_OUTPUT", "models/flood/glofas-multihorizon-tree.joblib"))
+METRICS_OUTPUT = Path(os.environ.get("FLOOD_TREE_METRICS_OUTPUT", "models/flood/glofas-multihorizon-tree-metrics.json"))
 HORIZONS = (1, 3, 6)
-TARGET_DAYS = (30, 90, 180)
+FEATURES = ("logMean", "logSpread", "logP10", "logP50", "logP90", "exceedanceProbability", "thresholdRatio")
 
 
-def coordinate_name(dataset, candidates):
-    for name in candidates:
-        if name in dataset.coords or name in dataset.dims:
-            return name
-    raise RuntimeError(f"Missing coordinate; expected one of {candidates}")
+def feature_vector(forecast):
+    """Log-transform discharge values while retaining ensemble uncertainty features."""
+    return [
+        np.log1p(max(0.0, float(forecast["mean"]))),
+        np.log1p(max(0.0, float(forecast["spread"]))),
+        np.log1p(max(0.0, float(forecast["p10"]))),
+        np.log1p(max(0.0, float(forecast["p50"]))),
+        np.log1p(max(0.0, float(forecast["p90"]))),
+        float(forecast["exceedanceProbability"]),
+        float(forecast["thresholdRatio"]),
+    ]
 
 
-def discharge_name(dataset):
-    for name in ("dis24", "avg_dis", "average_river_discharge_in_the_last_24_hours", "river_discharge_in_the_last_24_hours", "discharge"):
-        if name in dataset.data_vars:
-            return name
-    raise RuntimeError(f"No discharge variable found; available: {list(dataset.data_vars)}")
+def load_rows():
+    if not DATASET.is_file():
+        raise FileNotFoundError(f"Missing dataset: {DATASET}")
+    rows = {horizon: {"train": [], "calibration": [], "test": []} for horizon in HORIZONS}
+    with DATASET.open(encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            row = json.loads(line)
+            split = row.get("split")
+            forecasts, targets = row.get("forecast", []), row.get("targets", {}).get("flood", [])
+            if split not in ("train", "calibration", "test") or len(forecasts) != 3 or len(targets) != 3:
+                raise ValueError(f"Invalid row {line_number}")
+            for forecast, target in zip(forecasts, targets):
+                horizon = int(forecast["leadMonth"])
+                if horizon not in rows or target not in (0, 1):
+                    raise ValueError(f"Invalid lead or target in row {line_number}")
+                values = feature_vector(forecast)
+                if not np.isfinite(values).all():
+                    continue
+                rows[horizon][split].append((values, int(target)))
+    return rows
 
 
-def normalize_longitudes(longitudes, coordinate):
-    values = np.asarray(coordinate.values)
-    return np.mod(longitudes, 360) if values.min() >= 0 and np.any(longitudes < 0) else longitudes
+def arrays(entries):
+    x, y = zip(*entries)
+    return np.asarray(x, dtype=np.float64), np.asarray(y, dtype=np.int8)
 
 
-def split_for(latitude, longitude, year):
-    region = f"glofas-{round(latitude, 1):.1f}-{round(longitude, 1):.1f}"
-    bucket = int(hashlib.sha256(region.encode("utf-8")).hexdigest()[:8], 16) % 100
-    if bucket < 70 and year <= 2018:
-        return region, "train"
-    if 70 <= bucket < 85 and 2019 <= year <= 2021:
-        return region, "calibration"
-    if bucket >= 85 and year >= 2022:
-        return region, "test"
-    return region, None
+def best_threshold(probability, target):
+    candidates = np.linspace(0.05, 0.95, 181)
+    scores = [f1_score(target, probability >= threshold, zero_division=0) for threshold in candidates]
+    return float(candidates[int(np.argmax(scores))])
 
 
-def origin_time(dataset):
-    for name in ("forecast_reference_time", "time"):
-        if name in dataset.coords:
-            return pd.Timestamp(np.asarray(dataset[name].values).reshape(-1)[0])
-    raise RuntimeError("Seasonal file is missing forecast_reference_time/time")
+def train_horizon(horizon, splits):
+    x_train, y_train = arrays(splits["train"])
+    x_cal, y_cal = arrays(splits["calibration"])
+    x_test, y_test = arrays(splits["test"])
+    if min(len(x_train), len(x_cal), len(x_test)) == 0 or len(np.unique(y_train)) < 2:
+        raise ValueError(f"+{horizon}M has insufficient class coverage")
 
+    # Balance rare flood labels without discarding the much larger no-flood history.
+    positives = max(1, int(y_train.sum()))
+    negatives = max(1, len(y_train) - positives)
+    weights = np.where(y_train == 1, len(y_train) / (2 * positives), len(y_train) / (2 * negatives))
+    classifier = HistGradientBoostingClassifier(
+        learning_rate=0.08,
+        max_iter=250,
+        max_leaf_nodes=31,
+        l2_regularization=1.0,
+        random_state=42,
+    )
+    classifier.fit(x_train, y_train, sample_weight=weights)
 
-def lead_indices(dataset):
-    name = coordinate_name(dataset, ("forecast_period", "step", "leadtime"))
-    values = np.asarray(dataset[name].values).reshape(-1)
-    days = values / np.timedelta64(1, "D") if np.issubdtype(values.dtype, np.timedelta64) else values.astype(float)
-    indices = [int(np.argmin(np.abs(days - target))) for target in TARGET_DAYS]
-    for target, index in zip(TARGET_DAYS, indices):
-        if abs(float(days[index]) - target) > 20:
-            raise RuntimeError(f"Missing usable {target}-day lead; nearest is {days[index]} days")
-    return name, indices
+    # Isotonic calibration and threshold choice use calibration data only.
+    raw_cal = classifier.predict_proba(x_cal)[:, 1]
+    calibrator = IsotonicRegression(out_of_bounds="clip").fit(raw_cal, y_cal)
+    calibrated_cal = calibrator.predict(raw_cal)
+    threshold = best_threshold(calibrated_cal, y_cal)
+    probability = calibrator.predict(classifier.predict_proba(x_test)[:, 1])
+    predicted = probability >= threshold
+    climatology_brier = brier_score_loss(y_test, np.full(len(y_test), y_cal.mean()))
+    brier = brier_score_loss(y_test, probability)
+    metrics = {
+        "balancedAccuracy": float(balanced_accuracy_score(y_test, predicted)),
+        "f1": float(f1_score(y_test, predicted, zero_division=0)),
+        "precision": float(precision_score(y_test, predicted, zero_division=0)),
+        "recall": float(recall_score(y_test, predicted, zero_division=0)),
+        "brierScore": float(brier),
+        "brierSkill": float(1 - brier / climatology_brier) if climatology_brier else 0.0,
+        "threshold": threshold,
+        "counts": {"train": len(y_train), "calibration": len(y_cal), "test": len(y_test), "testPositive": int(y_test.sum())},
+    }
+    return {"classifier": classifier, "calibrator": calibrator, "threshold": threshold}, metrics
 
 
 def main():
-    seasonal_files = sorted(path for path in SEASONAL_SOURCE.glob("seasonal-????-??.nc") if path.stat().st_size > 10_000)
-    historical_files = sorted(HISTORICAL_SOURCE.glob("historical-*.nc")) if HISTORICAL_SOURCE.is_dir() else [HISTORICAL_SOURCE]
-    if not seasonal_files:
-        raise RuntimeError(f"No seasonal NetCDF files found in {SEASONAL_SOURCE}")
-    if not historical_files:
-        raise RuntimeError(f"No historical NetCDF files found in {HISTORICAL_SOURCE}")
-
-    with xr.open_dataset(seasonal_files[0]) as sample:
-        seasonal_lat = coordinate_name(sample, ("latitude", "lat"))
-        seasonal_lon = coordinate_name(sample, ("longitude", "lon"))
-        latitudes = np.asarray(sample[seasonal_lat].values)[::GRID_STRIDE]
-        longitudes = np.asarray(sample[seasonal_lon].values)[::GRID_STRIDE]
-
-    history = xr.open_mfdataset(historical_files, combine="by_coords", chunks="auto")
-    history_variable = discharge_name(history)
-    history_lat = coordinate_name(history, ("latitude", "lat"))
-    history_lon = coordinate_name(history, ("longitude", "lon"))
-    history_time = coordinate_name(history, ("time", "valid_time"))
-    history_grid = history[history_variable].sel({history_lat: latitudes, history_lon: normalize_longitudes(longitudes, history[history_lon])}, method="nearest")
-    for dimension in list(history_grid.dims):
-        if dimension not in (history_time, history_lat, history_lon):
-            history_grid = history_grid.mean(dimension, skipna=True)
-    history_grid = history_grid.load()
-    thresholds = history_grid.sel({history_time: slice(None, BASELINE_END)}).quantile(0.95, dim=history_time, skipna=True).load().values
-
+    rows = load_rows()
+    models, metrics = {}, {}
+    for horizon in HORIZONS:
+        models[str(horizon)], metrics[str(horizon)] = train_horizon(horizon, rows[horizon])
+        result = metrics[str(horizon)]
+        print(
+            f"+{horizon}M | BA={result['balancedAccuracy']:.3f} F1={result['f1']:.3f} "
+            f"P={result['precision']:.3f} R={result['recall']:.3f} "
+            f"BSS={result['brierSkill']:.3f} threshold={result['threshold']:.2f}",
+            flush=True,
+        )
+    accepted = {horizon: value["balancedAccuracy"] >= 0.6 and value["f1"] >= 0.5 and value["brierSkill"] > 0 for horizon, value in metrics.items()}
+    artifact = {"schemaVersion": 1, "modelType": "HistGradientBoostingClassifier with isotonic calibration", "features": FEATURES, "models": models, "metrics": metrics, "deployment": accepted}
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    temporary = OUTPUT.with_suffix(OUTPUT.suffix + ".tmp")
-    rows_written = rows_skipped = 0
-
-    with temporary.open("w", encoding="utf-8") as target:
-        for file_number, file in enumerate(seasonal_files, 1):
-            with xr.open_dataset(file) as dataset:
-                variable = discharge_name(dataset)
-                lat_name = coordinate_name(dataset, ("latitude", "lat"))
-                lon_name = coordinate_name(dataset, ("longitude", "lon"))
-                member_name = coordinate_name(dataset, ("number", "realization", "member"))
-                lead_name, indices = lead_indices(dataset)
-                origin = origin_time(dataset)
-                observed = []
-                for horizon in HORIZONS:
-                    start = np.datetime64((origin + pd.DateOffset(months=horizon)).replace(day=1).date())
-                    end = np.datetime64((pd.Timestamp(start) + pd.offsets.MonthEnd(1)).date())
-                    observed.append(np.asarray(history_grid.sel({history_time: slice(start, end)}).max(history_time, skipna=True).values, dtype=float))
-
-                ensemble = []
-                for lead_index in indices:
-                    lead = dataset[variable].isel({lead_name: lead_index}).sel({lat_name: latitudes, lon_name: normalize_longitudes(longitudes, dataset[lon_name])}, method="nearest")
-                    for dimension in list(lead.dims):
-                        if dimension not in (member_name, lat_name, lon_name):
-                            lead = lead.isel({dimension: 0})
-                    values = np.asarray(lead.transpose(member_name, lat_name, lon_name).load().values, dtype=float)
-                    ensemble.append(values)
-
-                for lat_index, latitude in enumerate(latitudes):
-                    for lon_index, longitude in enumerate(longitudes):
-                        region, split = split_for(float(latitude), float(longitude), origin.year)
-                        threshold = float(thresholds[lat_index, lon_index])
-                        if split is None or not np.isfinite(threshold) or threshold <= 0:
-                            rows_skipped += 1
-                            continue
-                        forecasts, targets, valid = [], [], True
-                        for horizon, members, observed_values in zip(HORIZONS, ensemble, observed):
-                            point_members = members[:, lat_index, lon_index]
-                            point_members = point_members[np.isfinite(point_members)]
-                            observed_value = observed_values[lat_index, lon_index]
-                            if not len(point_members) or not np.isfinite(observed_value):
-                                valid = False
-                                break
-                            mean, spread = float(np.mean(point_members)), float(np.std(point_members))
-                            p10, p50, p90 = (float(value) for value in np.quantile(point_members, (0.1, 0.5, 0.9)))
-                            forecasts.append({"leadMonth": horizon, "mean": mean, "spread": spread, "p10": p10, "p50": p50, "p90": p90, "exceedanceProbability": float(np.mean(point_members >= threshold)), "thresholdRatio": mean / threshold})
-                            targets.append(int(observed_value >= threshold))
-                        if not valid:
-                            rows_skipped += 1
-                            continue
-                        target.write(json.dumps({"schemaVersion": 1, "originDate": origin.isoformat(), "latitude": float(latitude), "longitude": float(longitude), "region": region, "split": split, "floodThreshold": threshold, "forecast": forecasts, "targets": {"flood": targets}}, separators=(",", ":")) + "\n")
-                        rows_written += 1
-            if file_number % 12 == 0 or file_number == len(seasonal_files):
-                print(f"Prepared {file_number}/{len(seasonal_files)} origins; rows={rows_written}; skipped={rows_skipped}", flush=True)
-
-    history.close()
-    temporary.replace(OUTPUT)
-    print(f"Wrote {rows_written} GloFAS multi-horizon flood rows to {OUTPUT}")
+    METRICS_OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(artifact, OUTPUT)
+    METRICS_OUTPUT.write_text(json.dumps({"metrics": metrics, "deployment": accepted}, indent=2), encoding="utf-8")
+    print(f"Saved model: {OUTPUT}")
+    print(f"Saved metrics: {METRICS_OUTPUT}")
 
 
 if __name__ == "__main__":
